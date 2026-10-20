@@ -15,6 +15,10 @@ import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.VarInsnNode;
+import org.objectweb.asm.tree.analysis.Analyzer;
+import org.objectweb.asm.tree.analysis.BasicValue;
+import org.objectweb.asm.tree.analysis.BasicVerifier;
+import org.objectweb.asm.tree.analysis.Frame;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -103,6 +107,16 @@ public final class FlowShuffle extends Transformer {
             return;
         }
 
+        // Guard splits resume at the anchor, so the anchor must start with an empty operand
+        // stack: otherwise the resume label becomes a jump target with values live across it,
+        // which blocks FlowFlatten (its dispatcher requires empty-stack block entries).
+        Frame<BasicValue>[] frames;
+        try {
+            frames = new Analyzer<>(new BasicVerifier()).analyze(owner.name, method);
+        } catch (Throwable e) {
+            frames = null; // unsupported shape: skip guard splits, keep the other techniques
+        }
+
         Mix.Rand rand = new Mix.Rand(Mix.of(config.seed, owner.name, method.name + method.desc, 0xF10F));
         int saltSlot = -1;
         int junkSlot = -1;
@@ -111,7 +125,8 @@ public final class FlowShuffle extends Transformer {
 
         List<JumpInsnNode> jumps = new ArrayList<>();
         List<AbstractInsnNode> anchors = new ArrayList<>();
-        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+        int index = 0;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext(), index++) {
             if (insn.getOpcode() < 0) {
                 continue;
             }
@@ -119,8 +134,11 @@ public final class FlowShuffle extends Transformer {
                     && jump.getOpcode() != Opcodes.GOTO
                     && jump.getOpcode() != Opcodes.JSR) {
                 jumps.add(jump);
-            } else {
-                anchors.add(insn);
+            } else if (frames != null) {
+                Frame<BasicValue> frame = index < frames.length ? frames[index] : null;
+                if (frame != null && frame.getStackSize() == 0) {
+                    anchors.add(insn);
+                }
             }
         }
 
@@ -186,6 +204,12 @@ public final class FlowShuffle extends Transformer {
             added += 2;
             edits++;
             inversions--;
+        }
+
+        if (edits > 0) {
+            // Inserted predicates/junk push a few slots. FlowFlatten sizes its analyzer
+            // frames from maxStack (the writer recomputes the real value with COMPUTE_MAXS).
+            method.maxStack += 4;
         }
     }
 

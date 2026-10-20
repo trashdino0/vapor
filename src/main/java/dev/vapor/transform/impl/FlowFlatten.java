@@ -2,6 +2,7 @@ package dev.vapor.transform.impl;
 
 import dev.vapor.config.VaporConfig;
 import dev.vapor.context.Context;
+import dev.vapor.context.hierarchy.IHierarchy;
 import dev.vapor.transform.Transformer;
 import dev.vapor.tree.JClass;
 import dev.vapor.util.Insns;
@@ -72,6 +73,9 @@ public final class FlowFlatten extends Transformer {
     private static final int MIN_BLOCKS = 3;
     private static final int MAX_INSTRUCTIONS = 2000;
 
+    /** Set {@code -Dvapor.debugFlatten=true} to log per-method skip reasons on stderr. */
+    private static final boolean DEBUG = Boolean.getBoolean("vapor.debugFlatten");
+
     private final VaporConfig config;
 
     public FlowFlatten(VaporConfig config) {
@@ -106,39 +110,52 @@ public final class FlowFlatten extends Transformer {
 
     void process(Context context, ClassNode owner, MethodNode method) {
         if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
+            skip(method, "abstract/native");
             return;
         }
         if ("<init>".equals(method.name)) {
+            skip(method, "constructor");
             return; // uninitializedThis across the dispatcher is not worth the risk
         }
         if (method.tryCatchBlocks != null && !method.tryCatchBlocks.isEmpty()) {
+            skip(method, "try/catch table");
             return;
         }
         if (context != null && context.isArtificialMethod(owner.name, method.name, method.desc)) {
+            skip(method, "artificial");
             return; // decryptors stay fast/small
         }
         int instructionCount = method.instructions.size();
         if (instructionCount < MIN_BLOCKS || instructionCount > MAX_INSTRUCTIONS) {
+            skip(method, "instruction count " + instructionCount);
             return;
         }
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             int opcode = insn.getOpcode();
             if (opcode == Opcodes.JSR || opcode == Opcodes.RET) {
+                skip(method, "JSR/RET");
                 return;
             }
         }
 
         List<Block> blocks = split(method);
-        if (blocks == null || blocks.size() < MIN_BLOCKS
-                || blocks.size() > Math.max(2, config.hardening.flattenMaxBlocks)) {
+        if (blocks == null) {
+            skip(method, "unresolved jump target");
+            return;
+        }
+        int maxBlocks = Math.max(2, config.hardening.flattenMaxBlocks);
+        if (blocks.size() < MIN_BLOCKS || blocks.size() > maxBlocks) {
+            skip(method, "block count " + blocks.size());
             return;
         }
 
+        IHierarchy hierarchy = context == null ? null : context.hierarchy();
         ensureMaxLocals(method);
         Frame<BasicValue>[] frames;
         try {
-            frames = new Analyzer<>(new ExactInterpreter()).analyze(owner.name, method);
+            frames = new Analyzer<>(new MergeInterpreter(hierarchy)).analyze(owner.name, method);
         } catch (AnalyzerException e) {
+            skip(method, "analyzer: " + e.getMessage());
             return;
         }
 
@@ -150,12 +167,18 @@ public final class FlowFlatten extends Transformer {
             }
             int index = method.instructions.indexOf(block.start);
             Frame<BasicValue> frame = index < 0 ? null : frames[index];
-            if (frame == null || frame.getStackSize() != 0) {
-                return; // frame unavailable / values live across a branch: skip method
+            if (frame == null) {
+                skip(method, "unreachable block " + i);
+                return;
+            }
+            if (frame.getStackSize() != 0) {
+                skip(method, "block " + i + " entry stack size " + frame.getStackSize());
+                return; // values live across a branch: skip method
             }
             block.frame = frame;
         }
         if (!resolve(blocks, labelBlocks)) {
+            skip(method, "edge resolution");
             return;
         }
 
@@ -170,11 +193,12 @@ public final class FlowFlatten extends Transformer {
             keys[i] = candidate;
         }
 
-        // One dispatcher per exact entry-frame signature, ordered by first block use.
-        // Ambiguous frames (null signature) get a private dispatcher each.
+        // One dispatcher per entry-frame signature, ordered by first block use. With hierarchy
+        // knowledge (the pipeline) the merge matches the verifier, so TOP slots may group;
+        // without it (unit fixtures) an ambiguous merge still gets a private dispatcher.
         Map<String, List<Integer>> grouped = new LinkedHashMap<>();
         for (int i = 0; i < blocks.size(); i++) {
-            String signature = signature(blocks.get(i).frame);
+            String signature = signature(blocks.get(i).frame, hierarchy != null);
             String key = signature == null ? "#" + i : signature;
             grouped.computeIfAbsent(key, ignored -> new ArrayList<>()).add(i);
         }
@@ -255,6 +279,16 @@ public final class FlowFlatten extends Transformer {
         method.localVariables = null;
         method.visibleLocalVariableAnnotations = null;
         method.invisibleLocalVariableAnnotations = null;
+        if (DEBUG) {
+            System.err.println("[flatten] ok " + method.name + method.desc
+                    + ": blocks=" + blocks.size() + ", dispatchers=" + groups.size());
+        }
+    }
+
+    private static void skip(MethodNode method, String reason) {
+        if (DEBUG) {
+            System.err.println("[flatten] skip " + method.name + method.desc + ": " + reason);
+        }
     }
 
     /** Emits state/value plumbing for one method. */
@@ -493,20 +527,17 @@ public final class FlowFlatten extends Transformer {
     }
 
     /**
-     * Exact local-slot type key. Three cases matter:
+     * Local-slot type key for dispatcher grouping.
      * <ul>
-     *   <li>a typed slot → its descriptor;</li>
-     *   <li>a Java-null slot → no path ever initialized it (real frame: TOP, unreadable) —
-     *       shared marker, safe to group;</li>
-     *   <li>a wide second slot → {@code W} (not independently addressable, the preceding
-     *       slot's descriptor disambiguates);</li>
-     *   <li>any other {@code UNINITIALIZED_VALUE} → the analyzer merged incompatible values
-     *       (the real verifier may still see a usable common supertype), so the block gets a
-     *       private dispatcher — merging it with unrelated wide/empty slots would turn a
-     *       readable local into TOP.</li>
+     *   <li>typed slot → descriptor;</li>
+     *   <li>null slot → no path ever initialized it (TOP, unreadable) — {@code ?};</li>
+     *   <li>wide second slot → {@code W} (the preceding descriptor disambiguates);</li>
+     *   <li>{@code UNINITIALIZED_VALUE} → TOP when merging follows verifier semantics
+     *       ({@code topGroupable}); otherwise an ambiguous analyzer merge that may hide a
+     *       usable common supertype, so the block gets a private dispatcher ({@code null}).</li>
      * </ul>
      */
-    private static String signature(Frame<BasicValue> frame) {
+    private static String signature(Frame<BasicValue> frame, boolean topGroupable) {
         StringBuilder builder = new StringBuilder(frame.getLocals() * 8);
         for (int i = 0; i < frame.getLocals(); i++) {
             BasicValue value = frame.getLocal(i);
@@ -521,7 +552,11 @@ public final class FlowFlatten extends Transformer {
                     builder.append("W;");
                     continue;
                 }
-                return null; // ambiguous merge result: dispatcher must be private
+                if (!topGroupable) {
+                    return null; // ambiguous merge result: dispatcher must be private
+                }
+                builder.append("?;");
+                continue;
             }
             builder.append(type.getDescriptor()).append(';');
         }
@@ -571,11 +606,21 @@ public final class FlowFlatten extends Transformer {
         }
     }
 
-    /** Keeps exact reference types (BasicInterpreter would collapse them all to Object). */
-    private static final class ExactInterpreter extends BasicInterpreter {
+    /**
+     * Exact reference types plus verifier-style reference merging. ASM's
+     * {@code BasicInterpreter} collapses every reference to {@code Object}; the exact
+     * variant alone marks merged references as ambiguous, which fragments methods into a
+     * dispatcher per block. With a hierarchy we compute the same common supertype the
+     * writer's {@code getCommonSuperClass} will use, so merged slots keep their real frame
+     * type; without one (unit fixtures) merging stays exact/conservative.
+     */
+    private static final class MergeInterpreter extends BasicInterpreter {
 
-        ExactInterpreter() {
+        private final IHierarchy hierarchy;
+
+        MergeInterpreter(IHierarchy hierarchy) {
             super(Opcodes.ASM9);
+            this.hierarchy = hierarchy;
         }
 
         @Override
@@ -584,6 +629,33 @@ public final class FlowFlatten extends Transformer {
                 return new BasicValue(type);
             }
             return super.newValue(type);
+        }
+
+        @Override
+        public BasicValue merge(BasicValue value1, BasicValue value2) {
+            if (value1.equals(value2)) {
+                return value1;
+            }
+            Type type1 = value1.getType();
+            Type type2 = value2.getType();
+            if (hierarchy == null || type1 == null || type2 == null) {
+                return BasicValue.UNINITIALIZED_VALUE;
+            }
+            boolean reference1 = type1.getSort() == Type.OBJECT || type1.getSort() == Type.ARRAY;
+            boolean reference2 = type2.getSort() == Type.OBJECT || type2.getSort() == Type.ARRAY;
+            if (!reference1 || !reference2) {
+                return BasicValue.UNINITIALIZED_VALUE;
+            }
+            String common = hierarchy.getCommonSuperClass(name(type1), name(type2));
+            return reference(common);
+        }
+
+        private static String name(Type type) {
+            return type.getSort() == Type.ARRAY ? type.getDescriptor() : type.getInternalName();
+        }
+
+        private static BasicValue reference(String name) {
+            return new BasicValue(name.startsWith("[") ? Type.getType(name) : Type.getObjectType(name));
         }
     }
 

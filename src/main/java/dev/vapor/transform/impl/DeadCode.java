@@ -87,11 +87,11 @@ public final class DeadCode extends Transformer {
         }
     }
 
-    private void process(Context context, ClassNode owner, MethodNode method) {
+    void process(Context context, ClassNode owner, MethodNode method) {
         if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
             return;
         }
-        if (context.isArtificialMethod(owner.name, method.name, method.desc)) {
+        if (context != null && context.isArtificialMethod(owner.name, method.name, method.desc)) {
             return;
         }
         int count = method.instructions.size();
@@ -159,6 +159,11 @@ public final class DeadCode extends Transformer {
             AbstractInsnNode anchor = candidates.remove(rand.nextInt(candidates.size()));
             added += inject(method, anchor, saltSlot, junkSlot, rand);
         }
+
+        // Decoys (and the salt init) push up to a few slots at stack-empty anchors. FlowShuffle
+        // and FlowFlatten size their analyzer frames from maxStack; the writer recomputes the
+        // real value with COMPUTE_MAXS, so keeping the bound truthful costs nothing.
+        method.maxStack += 4;
     }
 
     /** The first {@code invokespecial <init>} of a constructor — everything before it is off limits. */

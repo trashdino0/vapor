@@ -349,31 +349,41 @@ huge methods far beyond the samples.
 - State values are unique, non-sequential ints from `Mix` (not `0..n`); the physical block order
   inside each dispatcher section is shuffled by a seeded `Mix.Rand`; output stays deterministic.
   `IntObfuscation` runs afterwards and XOR-obfuscates the state constants too.
-- **One dispatcher per exact entry-frame signature** — and this is the subtle part. A dispatcher
-  is a frame-merge point: the switch merges the locals of *every* path that jumps back to it, and
-  each case inherits that merged frame. Blocks may share a dispatcher only if their entry frames
-  are exactly identical; otherwise the merged frame is weaker than what the block verifies
-  against. This was found the hard way: the first stress run failed
-  `an.ny(Lad;)Z @1888: aload` with `Type top (current frame, locals[13]) is not assignable to
-  reference type`. ASM's `BasicInterpreter` collapses all references to `Object`, and its merge is
-  equality-based, so the signature must use an exact-type interpreter. Even then, three kinds of
-  "no type" must not be conflated:
-  - a Java-null slot = never initialized on any path (real frame: TOP, unreadable) — safe to
-    share under a `?` marker;
-  - a `UNINITIALIZED_VALUE` slot whose predecessor slot holds a long/double = the wide value's
-    second slot (not independently addressable) — `W` marker, the preceding descriptor
-    disambiguates;
-  - any other `UNINITIALIZED_VALUE` = the analyzer merged incompatible values, while the real
-    verifier may still see a usable common supertype. Grouping such a block with a wide/empty
-    slot would turn a readable local into TOP → the block gets a **private dispatcher**
-    (`#<block>` key), which merges only its own predecessors and therefore reproduces its
-    original entry frame.
+- **One dispatcher per verifier-consistent entry-frame signature** — and this is the subtle part. A
+  dispatcher is a frame-merge point: the switch merges the locals of *every* path that jumps back
+  to it, and each case inherits that merged frame. Blocks may share a dispatcher only when the
+  merged frame is exactly what each block verifies against. This was found the hard way: the first
+  stress run failed `an.ny(Lad;)Z @1888: aload` with `Type top (current frame, locals[13]) is not
+  assignable to reference type`. ASM's `BasicInterpreter` collapses all references to `Object` and
+  merges by equality, so the signature comes from a custom interpreter that keeps exact reference
+  types *and* merges them via `Context.hierarchy().getCommonSuperClass` — the same hierarchy
+  `VaporClassWriter` uses for `COMPUTE_FRAMES`. Merged slots therefore keep the type the verifier
+  will see instead of degrading to `UNINITIALIZED_VALUE`. Two "no type" cases stay distinct:
+  - a Java-null slot / verifier-TOP (never initialized, or incompatible values merged under the
+    hierarchy interpreter) — unreadable, shared `?` marker, safe to group;
+  - an `UNINITIALIZED_VALUE` immediately after a long/double = the wide value's second slot (not
+    independently addressable) — `W` marker, the preceding descriptor disambiguates.
+  Without a hierarchy (unit fixtures pass no `Context`), unequal references stay ambiguous and the
+  block gets a **private dispatcher** (`#<block>` key), which merges only its own predecessors and
+  therefore reproduces its original entry frame. With the hierarchy path, `countBelow` dropped from
+  25 private dispatchers to 6 grouped ones.
 - Skip rules: abstract/native, `<init>`, artificials (decryptors), any try/catch (covers
   `synchronized`), JSR/RET, analyzer failure, fewer than 3 blocks, more than
   `hardening.flattenMaxBlocks` blocks, more than 2000 instructions, and any block entry with a
   non-empty operand stack. The last rule matters: values live across branches (ternaries,
   short-circuit expressions) cannot pass through an empty-stack dispatcher. Spilling them into
   fresh locals at the edges would lift the restriction — future enhancement, not v3.
+- **Pipeline interaction** (found while exercising the demo jars in 0.3.1). Two invariants were
+  missing: (1) analyzers size their frames from `MethodNode.maxStack`, but the transforms insert
+  code and rely on the writer's `COMPUTE_MAXS`, so by the time `FlowFlatten` ran the stored bound
+  was stale and the analyzer threw `Insufficient maximum stack size`, silently skipping whole
+  methods. `StringEncryptor`, `DeadCode` and `FlowShuffle` now raise `maxStack` by a safe constant
+  when they insert (the writer still recomputes the real value). (2) `FlowShuffle` guard splits
+  anchored at arbitrary stack depths; the resume label became a jump target carrying values, which
+  disqualified the method under the empty-stack rule. Guard-split anchors now require
+  `stackSize == 0` (measured with `BasicVerifier`; if analysis fails, guard splits are skipped and
+  the other techniques still run). `-Dvapor.debugFlatten=true` prints the per-method skip reason
+  on stderr.
 - Reordering invalidates `LocalVariableTable` ranges (first version threw
   `ClassFormatError: Invalid length 65512 in LocalVariableTable` on the fixture), so flattened
   methods drop local-variable tables/annotations. The default pipeline strips them earlier.
@@ -381,8 +391,24 @@ huge methods far beyond the samples.
   frame signature, uses non-sequential switch keys and appends dispatchers at method end;
   Skidfuscator's `DriverTransformer` provides opaque per-method/block predicates used as state
   values. Vapor adopts the frame-grouping insight and randomized keys, not the code.
-- Coverage on the CFR stress jar: 179 of 8883 methods (constructors, exception-heavy and
-  ternary-heavy code dominate the skips), 0 verification failures, self-decompilation identical.
+- Coverage after 0.3.1: 2094 of 8883 methods on the CFR stress jar (was 179 before the fixes
+  above; constructors, exception-heavy and ternary-heavy code dominate the remaining skips), 0
+  verification failures, self-decompilation identical. Demo playground: demo-cli 6/40 methods
+  flattened, demo-math 4/15 (`fnv1a`, `longest`, `main`, `countBelow`), both behavior-identical;
+  jars grow ~2.2–2.8x.
+
+### v3.5 — post-release flattening fixes (0.3.1)
+
+- Running the demo jars through the playground exposed that `FlowFlatten` was effectively inert in
+  the default pipeline (demo-math: 0 methods flattened although 4 were eligible). The three root
+  causes and their fixes are documented in the v3.3 bullets above: stale `maxStack` after inserted
+  code, guard-split resume labels at non-empty stack, and equality-only reference merging that
+  fragmented methods into private dispatchers.
+- Verification: 25/25 unit tests (new pipeline-order regression: `StringEncryptor` + `DeadCode` +
+  `FlowShuffle` then `FlowFlatten` must still flatten); three rigs green; both demo jars
+  behavior-identical; CFR stress 2094/8883 methods flattened, LoadCheck 0 failures, obfuscated CFR
+  exit 0, 733/733 decompiled files byte-identical; hardening determinism PASS. The `--version`
+  banner (hardcoded `0.2.0`) now reports `0.3.1`.
 
 ## Reference-tool findings (from the earlier REA investigation — for Phase 2+)
 

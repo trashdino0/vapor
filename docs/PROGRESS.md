@@ -20,6 +20,7 @@
 | V4 | Polymorphic string decryptors | ✅ Done (2026-10-18) |
 | V5 | Stress test + docs | ✅ Done (2026-10-18) |
 | v3.0–v3.4 | v3: coverage & control flow (0.3.0) | ✅ Done (2026-10-19) |
+| v3.5 | Post-release flattening fixes (0.3.1) | ✅ Done (2026-10-19) |
 
 **v1 is complete** — renaming + metadata hygiene + string encryption (+ watermark), rig-verified
 on Java 21 and Java 8 samples.
@@ -29,9 +30,11 @@ obfuscation, flow noise and polymorphic decryptors. All transforms are dependenc
 (in-place insertions only), deterministic, budgeted, and verified by executable unit tests plus a
 self-hosting stress test (obfuscated CFR decompiles its own obfuscated jar byte-identically).
 
-**v3 (coverage & control flow) is complete (0.3.0)** — concat-recipe encryption, float/double
-constants and bounded control-flow flattening on top of the v2 envelope. Reference obfuscation,
-anti-tamper, salting and virtualization remain deferred (PLAN.md).
+**v3 (coverage & control flow) is complete (0.3.1)** — concat-recipe encryption, float/double
+constants and bounded control-flow flattening on top of the v2 envelope. The 0.3.1 patch fixed a
+pipeline interaction that left flattening mostly inert (stale `maxStack`, guard-split anchor
+placement, exact-only frame merging). Reference obfuscation, anti-tamper, salting and
+virtualization remain deferred (PLAN.md).
 
 ## Phase 0 — Bootstrap ✅ (2026-10-17)
 
@@ -403,6 +406,28 @@ Artifacts for inspection: `%TEMP%\opencode\vapor-rig\hello-21\` and `...\legacy8
   decompiles produced); CFR stress re-run: 1302 classes, 0 verification failures, obfuscated CFR
   exit 0, 733/733 self-decompile files byte-identical; hardening output deterministic
   (ratio unchanged, new hash includes flattening). README/NOTES/PLAN updated to 0.3.0.
+- v3.5 (patch `0.3.1`): exercising the demo playground jars showed `FlowFlatten` was inert in the
+  default pipeline (0 methods in demo-math despite 4 eligible ones). Three independent causes:
+  1. transforms insert code but never updated `MethodNode.maxStack`; downstream analyzers size
+     frames from it and threw `Insufficient maximum stack size`, silently skipping the method.
+     `StringEncryptor`, `DeadCode` and `FlowShuffle` now raise the bound by a safe constant when
+     they insert; the writer still recomputes the real value with `COMPUTE_MAXS`.
+  2. `FlowShuffle` guard splits resumed at arbitrary stack depths. The resume label became a jump
+     target carrying values across it, so the whole method failed the empty-stack-entry rule
+     (demo-math `fnv1a`/`main`). Guard-split anchors now require `stackSize == 0`, measured with a
+     `BasicVerifier` pass; the other techniques are unchanged.
+  3. `FlowFlatten` grouped blocks by exact-only frames, so a local assigned on only one path
+     merged to `UNINITIALIZED_VALUE` and every join block got a private dispatcher (25 dispatchers
+     for `Primes.countBelow`). The merge interpreter now keeps exact reference types but merges
+     them through `Context.hierarchy().getCommonSuperClass`, matching the writer's
+     `COMPUTE_FRAMES`; with a hierarchy, TOP slots group under `?`. Without a hierarchy (unit
+     fixtures) ambiguous merges still get private dispatchers, which is sound but verbose.
+- v3.5 verification: 25/25 tests (new "flattening survives DeadCode + FlowShuffle" regression);
+  rigs hello/legacy8/hardening green; demo jars behavior-identical (demo-cli 6/40 methods
+  flattened, demo-math 4/15: `fnv1a`, `longest`, `main`, `countBelow`); CFR stress 2094/8883
+  methods flattened (was 179), LoadCheck 1302/1302 clean, obfuscated CFR exit 0, 733/733
+  self-decompile files byte-identical; hardening determinism PASS. `vapor --version` now reports
+  0.3.1 (the banner was still hardcoded to 0.2.0).
 
 ## Decisions log (short)
 

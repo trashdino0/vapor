@@ -9,6 +9,9 @@ import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.MethodNode;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -84,6 +87,35 @@ class FlowFlattenTest {
             flatten.process(null, second, method);
         }
         assertArrayEquals(Reload.write(first), Reload.write(second), "same input + seed must produce identical bytes");
+    }
+
+    /**
+     * Pipeline-order regression: dead-code decoys and flow-shuffle guard splits run first.
+     * Their inserted code pushes a few slots (insufficient {@code maxStack} used to make the
+     * analyzer fail) and guard splits used to resume at non-empty stack points (which made
+     * whole methods ineligible for flattening). Flattening must still fire.
+     */
+    @Test
+    void flatteningSurvivesEarlierNoiseTransforms() throws Exception {
+        VaporConfig config = new VaporConfig();
+        ClassNode node = Reload.read(FlowFixture.class);
+        List<MethodNode> methods = new ArrayList<>(node.methods);
+        new StringEncryptor(config).encrypt(node);
+
+        DeadCode deadCode = new DeadCode(config);
+        FlowShuffle shuffle = new FlowShuffle(config);
+        for (MethodNode method : methods) {
+            deadCode.process(null, node, method);
+            shuffle.process(null, node, method);
+        }
+
+        int before = switches(node);
+        FlowFlatten flatten = new FlowFlatten(config);
+        for (MethodNode method : methods) {
+            flatten.process(null, node, method);
+        }
+        assertTrue(switches(node) > before,
+                "flattening must still fire after DeadCode + FlowShuffle (" + before + " -> " + switches(node) + ")");
     }
 
     private static int invoke(Class<?> fixture, String name, int v) throws Exception {

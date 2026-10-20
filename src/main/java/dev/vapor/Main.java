@@ -30,7 +30,7 @@ import java.util.List;
  */
 public final class Main {
 
-    private static final String VERSION = "0.2.0";
+    private static final String VERSION = "0.3.1";
 
     private Main() {
     }

@@ -123,6 +123,7 @@ public final class StringEncryptor extends Transformer {
         int counter = 0;
         boolean replaced = false;
         for (MethodNode method : node.methods) {
+            boolean methodChanged = false;
             for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; ) {
                 AbstractInsnNode next = insn.getNext();
                 if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String value
@@ -132,6 +133,7 @@ public final class StringEncryptor extends Transformer {
                             callSequence(node.name, decryptorName, encode(value, key, math), key, isInterface));
                     method.instructions.remove(ldc);
                     replaced = true;
+                    methodChanged = true;
                 } else if (insn instanceof InvokeDynamicInsnNode indy && isStringConcat(indy)) {
                     int[] shared = {counter};
                     InsnList sequence = concatSequence(node, method, indy, decryptorName, isInterface, minLength, math, shared);
@@ -140,9 +142,16 @@ public final class StringEncryptor extends Transformer {
                         method.instructions.insertBefore(indy, sequence);
                         method.instructions.remove(indy);
                         replaced = true;
+                        methodChanged = true;
                     }
                 }
                 insn = next;
+            }
+            if (methodChanged) {
+                // Decryption/concat sequences push a few slots more than the instruction they
+                // replace; downstream analyzers (DeadCode, FlowFlatten) size their frames from
+                // maxStack. The writer recomputes the real value with COMPUTE_MAXS.
+                method.maxStack += 4;
             }
         }
         if (replaced) {

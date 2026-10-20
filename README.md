@@ -43,7 +43,7 @@ java -jar build\libs\vapor-0.2.0.jar -i app.jar -o app-obf.jar -config vapor.jso
 |---|---|
 | `Renamer` | Renames classes (flattened to the root package), methods and fields through a global `name+descriptor` key — overrides, bridges and interface dispatch stay consistent. Innermost-aware; lambdas' call sites follow the SAM rename. |
 | `MetadataHygiene` | Strips line numbers, local variable tables, `MethodParameters`, generic signatures; rewrites `SourceFile` to `a`; clears `SourceDebugExtension`. |
-| `StringEncryptor` | Replaces `LDC` string constants (length ≥ `strings.minLength`) with an encoded constant + per-string key + a call to a synthetic per-class decryptor. **Polymorphic**: each class gets one of 12 decryptor bodies (4 math shapes × 3 loop forms). |
+| `StringEncryptor` | Replaces `LDC` string constants (length ≥ `strings.minLength`) with an encoded constant + per-string key + a call to a synthetic per-class decryptor. **Polymorphic**: each class gets one of 12 decryptor bodies (4 math shapes × 3 loop forms). Since v3.1 it also rewrites `invokedynamic` string-concat call sites into decryptor-backed `StringBuilder` chains, so recipe literals leave the class file too. |
 | `DeadCode` | Inserts opaque-predicate-guarded decoy blocks at stack-empty points (never before `super()` in constructors). All junk is side-effect-free even if executed. |
 | `FlowShuffle` | Control-flow noise: guard splits, condition perturbation (`(x)` → `(x ^ 0)`), jump inversion. Constructors are left alone. |
 | `IntObfuscation` | Rewrites every real int/long constant push as `v ^ k` with a per-site key. Runs last so constants injected by other transforms are covered too. |
@@ -51,9 +51,10 @@ java -jar build\libs\vapor-0.2.0.jar -i app.jar -o app-obf.jar -config vapor.jso
 | `ResourceFixups` | Rewrites `Main-Class` / `Launcher-Agent-Class` / `Agent-Class` and `META-INF/services/*` (file name and provider lines) to follow the mapping. |
 | `MappingExport` | Writes a ProGuard-style mapping (classes, then fields, then methods with readable signatures). |
 
-Not in v1/v2 (v3 candidates, by design): control-flow flattening, reference obfuscation,
-number encoding beyond int/long, anti-debug/integrity checks, native and virtualization. The
-pipeline is built so those plug in as additional transformers.
+v3.1 encrypts string-concat literals too (the `invokedynamic` call site is rewritten, so the
+recipe disappears from the class file). Still deferred: float/double constants (v3.2), bounded
+control-flow flattening (v3.3), reference obfuscation, anti-debug/integrity checks, native and
+virtualization. The pipeline is built so those plug in as additional transformers.
 
 ## Config reference
 
@@ -141,8 +142,9 @@ watermark field before renaming) show up under their generated names.
 ## Known limitations (v1/v2, intentional)
 
 - **Plaintext that stays plaintext:** `ConstantValue` field initializers, annotation element
-  values and invokedynamic bootstrap arguments (string-concat recipes such as `"day=" + x`,
-  record `toString` recipes). These are not `LDC` instructions.
+  values, record `toString` recipes, and string-concat recipes that contain literal control
+  characters (those ride in as `\u0002` bootstrap constants and are left untouched — fail-safe).
+  These are not `LDC` instructions.
 - **Record component names are kept** (the `ObjectMethods` bootstrap couples them).
 - **Package structure is flattened** — renamed classes go to the root package.
 - **`module-info.class` disables renaming** (warning emitted): a modular jar's exports would

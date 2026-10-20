@@ -1,8 +1,9 @@
 # Plaintext markers: LDC string constants that must NOT survive obfuscation.
 # The rig scans every entry of the obfuscated jar for these substrings.
 # Rules for adding markers:
-#   - no fragments of string-concat recipes ("x=" + y) — javac keeps the recipe text as an
-#     invokedynamic bootstrap argument, which v1/v2 deliberately do not encrypt;
+#   - string-concat literals are covered since v3.1: the invokedynamic call site is
+#     rewritten and the recipe leaves the class file. Avoid literals shorter than
+#     strings.minLength (2) and control-character recipes (\u0002 bootstrap constants);
 #   - no substrings of class names, package names, manifests or resources.
 === vapor sample: hardening ===
 === done ===
@@ -10,3 +11,4 @@ hardening-marker-alpha
 hardening-marker-beta
 hardening-marker-gamma
 bonus-tag
+concat-recipe-marker

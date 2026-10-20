@@ -83,8 +83,10 @@
     consistently with the impl class rename (`ResourceFixups`).
 - `legacy8` stays records/sealed-free and uses plain `if/else` string compares so javac's
   release-8 output shape (StringBuilder concat, no indy concat) is what gets tested.
-- Never list a **string-concat literal** as a plaintext marker: javac ≥9 keeps concat recipes as
-  bootstrap-arg constants (`"Ahoy! \u0001"`), which v1 deliberately does not encrypt.
+- String-concat literals ARE eligible as plaintext markers since v3.1 (the call site is rewritten
+  and the recipe entry disappears). Exclusions: literals shorter than `strings.minLength`, and
+  recipes carrying `\u0002` bootstrap constants (literal control characters) — those keep their
+  `invokedynamic` and stay plaintext.
 
 ## Gradle gotchas
 
@@ -183,9 +185,10 @@ Shadow `com.gradleup.shadow` 9.6.1 · Gradle 9.8.1 · Java toolchain 21.
     cannot declare them. Vapor injects `public static` decryptors into interfaces and
     `private static` into classes so Java 8 targets stay loadable. The decryptor is
     `ACC_SYNTHETIC`, so it reads as tool-generated in javap.
-- Not encrypted (v1, documented in `StringEncryptor`): `ConstantValue` field strings,
-  annotation element values, invokedynamic bootstrap arguments (string-concat / record recipes).
-  Rig plaintext markers must avoid all three categories.
+- Not encrypted (documented in `StringEncryptor`): `ConstantValue` field strings, annotation
+  element values, and `invokedynamic` bootstrap arguments other than string-concat recipes
+  (record `toString`, enum/type-switch bootstraps). Concat recipes are covered since v3.1; rig
+  plaintext markers must still avoid the first two categories.
 - Decryptor name = first free base-26 name among the class's methods; deterministic. Synthetic
   methods are not in `mapping.txt` (retrace shows them as-is) — acceptable v1.
 
@@ -290,6 +293,37 @@ Result (2026-10-18): 1302 classes, 1.7 s, 2.16 → 2.92 MB, LoadCheck 0 failures
 6/6 identical, **cfr-obf.jar decompiling itself 733/733 identical**. Re-run this after any
 transform change; it exercises parsing, regex, hashing, switch tables, exception handling and
 huge methods far beyond the samples.
+
+## v3 notes (coverage & control flow)
+
+### v3.1 — concat-recipe encryption (`StringEncryptor`)
+
+- Every `makeConcatWithConstants` call site is replaced in place by: store args to fresh locals
+  (reverse descriptor order) → `new StringBuilder()` → per recipe component: literal →
+  `LDC enc; push key; invokestatic decryptor` + `append(String)`, argument → load + `append`
+  overload → `toString`. The sequence is straight-line, so no original jump can land inside it
+  and no frame merge observes the temporaries; `maxLocals` grows by the site's argument width.
+  No `BootstrapMethods` surgery is needed: the writer regenerates the table from the remaining
+  indy instructions and the unreferenced recipe vanishes.
+- Fail-safe skips (site left untouched): recipe contains `\u0002` (literal control characters are
+  passed as extra bootstrap constants — measured with javac 21: `"cc\u0001-" + s` becomes recipe
+  `\u0002\u0001` plus constant `cc\u0001-`), recipe/descriptor argument counts disagree,
+  `bsmArgs.length != 1`, or the recipe is otherwise malformed. `makeConcat` (no recipe) is
+  untouched; record `ObjectMethods` and switch bootstraps are never matched.
+- **Measured factory semantics** (probe: synthetic `([C)Ljava/lang/String;` call site):
+  `StringConcatFactory` converts *every* reference argument with `String.valueOf(Object)`
+  semantics — a `char[]` yields `[C@hash`, **not** its characters. Therefore all reference sorts
+  map to `StringBuilder.append(Object)`; `append(char[])` (or String/CharSequence special-casing)
+  would change behavior for the `[C` case. Primitives use their exact overload: `append(int)` for
+  `byte`/`short`, `append(char)` for `char` (decimal vs character!), `append(boolean)` for
+  `boolean` (true/false vs 1/0).
+- javac 21 pre-converts non-String reference operands with `String.valueOf(Object)` **before** the
+  call, so those descriptor types only appear in classes from other compilers (ecj, kotlinc…);
+  `ConcatEncryptionTest#rawDescriptorTypesMatchFactorySemantics` builds such sites by hand.
+- Verification: `ConcatFixture` (differential transcript: multi-part/folded recipes, every
+  primitive width, char[]/Object/String/null, surrogate pair, control-char skip, interface site)
+  + plaintext scan of the class file + the hardening rig marker `concat-recipe-marker`. Identity
+  hashes of fresh `char[]` must be normalized in differential transcripts (differ per invocation).
 
 ## Reference-tool findings (from the earlier REA investigation — for Phase 2+)
 

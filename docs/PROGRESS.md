@@ -364,6 +364,21 @@ Artifacts for inspection: `%TEMP%\opencode\vapor-rig\hello-21\` and `...\legacy8
 - Verified: 18/18 unit tests, three rigs green, determinism byte-identical on the playground
   samples, playground behavior PASS on both runnable demos (asm jar: 40/40 classes read).
 
+### 2026-10-19 — v3.0/v3.1 (git baseline + concat-literal encryption)
+- v3.0: repository initialized (`main`); `.gitignore` keeps playground outputs and third-party
+  reference jars out of history; baseline commit of v1+v2, then the v3 plan. Commit-per-phase
+  from here on.
+- v3.1: `StringEncryptor` rewrites `makeConcatWithConstants` call sites into decryptor-backed
+  `StringBuilder` chains; recipe literals no longer exist in the class file. Fail-safe skips for
+  `\u0002` control-character recipes and malformed shapes.
+- A probe settled the conversion semantics instead of guessing: the concat factory uses
+  `String.valueOf(Object)` for *all* reference args (`char[]` → `[C@hash`), so reference args map
+  to `append(Object)` (see NOTES.md).
+- Verified: 21/21 unit tests (new `ConcatEncryptionTest` — javac fixture transcript, hand-built
+  `([C)` / `(Ljava/lang/Object;)` sites, interface site), three rigs green (hardening now carries
+  the `concat-recipe-marker` plaintext marker and prints a concat line), determinism
+  byte-identical across runs.
+
 ## Decisions log (short)
 
 - **2026-10-17**: Java 21 + ASM over Rust — JVM bytecode ecosystem lives in Java; ASM owns the

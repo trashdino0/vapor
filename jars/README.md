@@ -62,8 +62,9 @@ every jar).
   Package structure is flattened to the root.
 - **String encryption** — try searching the obfuscated jar for a string you remember
   from the source (`grep -a "internal.example.com" jars/output/demo-cli/demo-cli-obf.jar`):
-  literal `LDC` strings are gone. Exceptions you will find: string-concat bootstrap
-  recipes, `static final` constant fields, annotation values (documented limitations).
+  literal `LDC` strings and string-concat recipes are gone. Exceptions you will find:
+  `static final` constant fields, annotation values, and concat recipes with literal control
+  characters (documented limitations).
 - **Integer obfuscation** — constants in the decompiled output appear as
   `0x519C08D6 ^ 0x3953F42D`-style pairs.
 - **Dead code + flow noise** — decoy `if (...)` blocks that never run, perturbed

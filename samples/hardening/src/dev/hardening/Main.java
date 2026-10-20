@@ -25,11 +25,17 @@ public final class Main {
         System.out.println("gcd=" + Computations.gcd(1071, 462));
         System.out.println("shapes=" + Shapes.describeAll());
         System.out.println("bonus=" + Bonus.summary());
+        System.out.println("concat=" + concatProbe("hardening-marker-delta"));
         System.out.println(String.format("marker=%s", "hardening-marker-gamma"));
         System.out.println("=== done ===");
     }
 
     private static String echo(String s) {
         return s;
+    }
+
+    /** v3.1 acceptance: a multi-part indy recipe whose literals must leave the jar. */
+    private static String concatProbe(String tail) {
+        return "concat-recipe-marker-" + tail + "#" + tail.length();
     }
 }

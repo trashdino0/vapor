@@ -20,6 +20,7 @@ public final class Main {
         System.out.println("math=" + Computations.workload(7));
         System.out.println("straight=" + Computations.straightLine(12345));
         System.out.println("loops=" + Loops.run(5));
+        System.out.println("flattened=" + Flattened.run(7));
         System.out.println("recursion=" + Computations.fib(20) + "," + Computations.mutual(10));
         System.out.println("switch=" + Computations.classify("hardening-marker-beta"));
         System.out.println("gcd=" + Computations.gcd(1071, 462));

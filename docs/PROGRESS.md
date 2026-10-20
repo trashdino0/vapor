@@ -383,6 +383,17 @@ Artifacts for inspection: `%TEMP%\opencode\vapor-rig\hello-21\` and `...\legacy8
   bits stay exact. `IntObfuscationTest` compares floats/doubles bit-for-bit (so `-0.0` cannot
   pass as `0.0`) and asserts NaNs are untouched. Verified: 22/22 tests, three rigs green,
   determinism byte-identical.
+- v3.3: `FlowFlatten` rewrites eligible methods into `lookupswitch` state machines: unique
+  non-sequential state keys from `Mix`, permuted block order, per-target trampolines,
+  `IllegalStateException` default. Dispatchers are per exact entry-frame signature; ambiguous
+  frames get private dispatchers. The CFR stress run found a real verifier bug in the first
+  version (`Type top ... is not assignable to reference type`) caused by conflating merged
+  reference types with long/double second slots; the signature rules were corrected (NOTES.md).
+- v3.3 verification: 24/24 unit tests (new `FlowFlattenTest`: differential execution over 19×19
+  ints + longs + dense/sparse switches, skip assertions for ternaries and try/catch, determinism);
+  `FlowFlatten` adds a `flattened=` line to the hardening rig (1 method flattened there);
+  stress on CFR 1302 classes: LoadCheck 0 failures, obfuscated CFR exit 0, 733/733 decompiled
+  files byte-identical; hardening output deterministic.
 
 ## Decisions log (short)
 

@@ -51,6 +51,8 @@ public final class VaporConfig {
         public boolean deadCode = true;
         public boolean integerObfuscation = true;
         public boolean flowShuffle = true;
+        // ---- v3 ----
+        public boolean flowFlatten = true;
     }
 
     public static final class Strings {
@@ -68,6 +70,8 @@ public final class VaporConfig {
         public int deadBranchesPerMethod = 3;
         /** Flow-noise edits (splits + inversions + condition perturbations) per method (cap). */
         public int flowSplitsPerMethod = 6;
+        /** v3.3: methods with more basic blocks than this stay unflattened. */
+        public int flattenMaxBlocks = 128;
     }
 
     public static VaporConfig defaults() {

@@ -214,7 +214,7 @@ Full block flattening (dispatcher, needs CFG permutation + value analysis), refe
 obfuscation, integrity verification (hash checks), class/field salting bloat, anti-debug,
 virtualization.
 
-## Vapor v3 — Coverage & Control Flow (planned 2026-10-19)
+## Vapor v3 — Coverage & Control Flow (v3.1–v3.3 shipped 2026-10-19; v3.4 acceptance pending)
 
 **Goal**: close the two visible coverage gaps (indy string-concat literals staying plaintext,
 float/double constants untouched) and add the first real control-flow transform (bounded
@@ -225,9 +225,9 @@ rigs and the self-hosting stress run. Commit-per-phase is back on (v3.0 re-estab
 
 | # | Feature | Transformer | Default |
 |---|---|---|---|
-| v3.1 | Encrypt `invokedynamic` string-concat literals | `StringEncryptor` upgrade | on |
-| v3.2 | Float / double constant obfuscation | `IntObfuscation` upgrade | on |
-| v3.3 | Bounded control-flow flattening (dispatcher + block permutation) | `FlowFlatten` | on |
+| v3.1 | Encrypt `invokedynamic` string-concat literals | `StringEncryptor` upgrade | on ✅ |
+| v3.2 | Float / double constant obfuscation | `IntObfuscation` upgrade | on ✅ |
+| v3.3 | Bounded control-flow flattening (dispatcher + block permutation) | `FlowFlatten` | on ✅ |
 
 ### Phases (each ends at a green rig + a commit)
 
@@ -254,8 +254,8 @@ unreferenced `BootstrapMethods` entries, so the recipe text leaves the class fil
 **v3.2 — float/double constants**: same bits-XOR split as int/long —
 `push (bits ^ k); push k; IXOR; invokestatic Float.intBitsToFloat(I)F` /
 `Double.longBitsToDouble(J)D`. Covers `FCONST_*` / `DCONST_*` / `LDC Float|Double`; exact bits
-are preserved for all finite values and infinities (documented exception: NaN payload bits are
-not preserved bit-for-bit — still NaN, but a distinct NaN pattern; acceptable).
+are preserved for all finite values and infinities. NaN constants are **skipped** so their raw
+payload bits stay bit-exact (XOR would alter the payload while still producing a NaN).
 
 **v3.3 — bounded flattening**: per method (skipped: `<init>`, artificials, anything with
 try/catch (this also covers `synchronized`), JSR/RET, methods whose block entries ever carry a

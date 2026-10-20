@@ -8,6 +8,7 @@ import dev.vapor.pipeline.postprocess.MappingExport;
 import dev.vapor.pipeline.postprocess.ResourceFixups;
 import dev.vapor.pipeline.preprocess.JarLoad;
 import dev.vapor.transform.impl.DeadCode;
+import dev.vapor.transform.impl.FlowFlatten;
 import dev.vapor.transform.impl.FlowShuffle;
 import dev.vapor.transform.impl.IntObfuscation;
 import dev.vapor.transform.impl.MetadataHygiene;
@@ -100,6 +101,7 @@ public final class Main {
                     .transformer(new StringEncryptor(config))
                     .transformer(new DeadCode(config))
                     .transformer(new FlowShuffle(config))
+                    .transformer(new FlowFlatten(config))
                     .transformer(new IntObfuscation(config))
                     .postprocess(new ResourceFixups())
                     .postprocess(new MappingExport(mappingPath))

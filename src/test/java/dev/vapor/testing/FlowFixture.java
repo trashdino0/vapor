@@ -82,4 +82,57 @@ public final class FlowFixture {
         } while (t != 0 && r < 1000);
         return r + (v > 0 ? v % 13 : -(v % 13));
     }
+
+    /** Dense switch plus loop, no values live across branches (flattening-eligible). */
+    public static int state5(int v) {
+        int r = v;
+        switch (v & 3) {
+            case 0:
+                r += 7;
+                break;
+            case 1:
+                r ^= 0x55;
+                break;
+            case 2:
+                r -= 3;
+                break;
+            default:
+                r = -r;
+        }
+        for (int i = 0; i < 5; i++) {
+            r = r * 31 + i;
+        }
+        return r;
+    }
+
+    /** Sparse switch: compiled to lookupswitch (flattening-eligible). */
+    public static int state6(int v) {
+        int r;
+        switch (v) {
+            case -100:
+                r = 1;
+                break;
+            case 7:
+                r = 2;
+                break;
+            case 1000:
+                r = 3;
+                break;
+            case 999983:
+                r = 4;
+                break;
+            default:
+                r = v;
+        }
+        return r;
+    }
+
+    /** Exception table: the flattener must skip this method wholesale. */
+    public static int guarded(int v) {
+        try {
+            return 10 / v + state1(v);
+        } catch (ArithmeticException e) {
+            return -1;
+        }
+    }
 }

@@ -340,6 +340,50 @@ huge methods far beyond the samples.
 - No new config switch: `transformers.integerObfuscation` now means "numeric constants" (int,
   long, float, double). Naming kept for compatibility; documented in the README.
 
+### v3.3 — bounded flattening (`FlowFlatten`)
+
+- Shape: `state = key(start); loop: switch (state) { case key_i: <block_i> ... }`. Each block's
+  terminator becomes `push key(successor); istore state; goto loop`; conditionals branch to two
+  tiny assignment trampolines; switches are rebuilt with per-target trampolines; RETURN/ATHROW
+  stay in place. The default case throws `IllegalStateException`.
+- State values are unique, non-sequential ints from `Mix` (not `0..n`); the physical block order
+  inside each dispatcher section is shuffled by a seeded `Mix.Rand`; output stays deterministic.
+  `IntObfuscation` runs afterwards and XOR-obfuscates the state constants too.
+- **One dispatcher per exact entry-frame signature** — and this is the subtle part. A dispatcher
+  is a frame-merge point: the switch merges the locals of *every* path that jumps back to it, and
+  each case inherits that merged frame. Blocks may share a dispatcher only if their entry frames
+  are exactly identical; otherwise the merged frame is weaker than what the block verifies
+  against. This was found the hard way: the first stress run failed
+  `an.ny(Lad;)Z @1888: aload` with `Type top (current frame, locals[13]) is not assignable to
+  reference type`. ASM's `BasicInterpreter` collapses all references to `Object`, and its merge is
+  equality-based, so the signature must use an exact-type interpreter. Even then, three kinds of
+  "no type" must not be conflated:
+  - a Java-null slot = never initialized on any path (real frame: TOP, unreadable) — safe to
+    share under a `?` marker;
+  - a `UNINITIALIZED_VALUE` slot whose predecessor slot holds a long/double = the wide value's
+    second slot (not independently addressable) — `W` marker, the preceding descriptor
+    disambiguates;
+  - any other `UNINITIALIZED_VALUE` = the analyzer merged incompatible values, while the real
+    verifier may still see a usable common supertype. Grouping such a block with a wide/empty
+    slot would turn a readable local into TOP → the block gets a **private dispatcher**
+    (`#<block>` key), which merges only its own predecessors and therefore reproduces its
+    original entry frame.
+- Skip rules: abstract/native, `<init>`, artificials (decryptors), any try/catch (covers
+  `synchronized`), JSR/RET, analyzer failure, fewer than 3 blocks, more than
+  `hardening.flattenMaxBlocks` blocks, more than 2000 instructions, and any block entry with a
+  non-empty operand stack. The last rule matters: values live across branches (ternaries,
+  short-circuit expressions) cannot pass through an empty-stack dispatcher. Spilling them into
+  fresh locals at the edges would lift the restriction — future enhancement, not v3.
+- Reordering invalidates `LocalVariableTable` ranges (first version threw
+  `ClassFormatError: Invalid length 65512 in LocalVariableTable` on the fixture), so flattened
+  methods drop local-variable tables/annotations. The default pipeline strips them earlier.
+- Reference study (REA inventory + CFR): Aidsfuscator filters blocks by analyzer frames, groups by
+  frame signature, uses non-sequential switch keys and appends dispatchers at method end;
+  Skidfuscator's `DriverTransformer` provides opaque per-method/block predicates used as state
+  values. Vapor adopts the frame-grouping insight and randomized keys, not the code.
+- Coverage on the CFR stress jar: 179 of 8883 methods (constructors, exception-heavy and
+  ternary-heavy code dominate the skips), 0 verification failures, self-decompilation identical.
+
 ## Reference-tool findings (from the earlier REA investigation — for Phase 2+)
 
 ### Aidsfuscator (primary blueprint, v2.10.0)

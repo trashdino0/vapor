@@ -46,15 +46,15 @@ java -jar build\libs\vapor-0.2.0.jar -i app.jar -o app-obf.jar -config vapor.jso
 | `StringEncryptor` | Replaces `LDC` string constants (length ≥ `strings.minLength`) with an encoded constant + per-string key + a call to a synthetic per-class decryptor. **Polymorphic**: each class gets one of 12 decryptor bodies (4 math shapes × 3 loop forms). Since v3.1 it also rewrites `invokedynamic` string-concat call sites into decryptor-backed `StringBuilder` chains, so recipe literals leave the class file too. |
 | `DeadCode` | Inserts opaque-predicate-guarded decoy blocks at stack-empty points (never before `super()` in constructors). All junk is side-effect-free even if executed. |
 | `FlowShuffle` | Control-flow noise: guard splits, condition perturbation (`(x)` → `(x ^ 0)`), jump inversion. Constructors are left alone. |
+| `FlowFlatten` | v3.3: bounded control-flow flattening — blocks are moved behind a `lookupswitch` state machine (random, unique state values; permuted block order; `IllegalStateException` default). One dispatcher per exact entry-frame signature; methods with try/catch, constructors, or values live across branches are skipped. |
 | `IntObfuscation` | Rewrites every real int/long/float/double constant push as `v ^ k` with a per-site key (floats/doubles go through their raw bits + `intBitsToFloat`/`longBitsToDouble`; NaN is skipped to keep payload bits exact). Runs last so constants injected by other transforms are covered too. |
 | `Watermark` | Optionally embeds the configured watermark as a private synthetic constant in one deterministic class. |
 | `ResourceFixups` | Rewrites `Main-Class` / `Launcher-Agent-Class` / `Agent-Class` and `META-INF/services/*` (file name and provider lines) to follow the mapping. |
 | `MappingExport` | Writes a ProGuard-style mapping (classes, then fields, then methods with readable signatures). |
 
-v3.1 encrypts string-concat literals too (the `invokedynamic` call site is rewritten, so the
-recipe disappears from the class file). Still deferred: float/double constants (v3.2), bounded
-control-flow flattening (v3.3), reference obfuscation, anti-debug/integrity checks, native and
-virtualization. The pipeline is built so those plug in as additional transformers.
+v3.3 adds bounded control-flow flattening on top (see `FlowFlatten` above). Still deferred:
+reference/proxy obfuscation, anti-tamper/integrity checks, native and virtualization. The
+pipeline is built so those plug in as additional transformers.
 
 ## Config reference
 
@@ -78,7 +78,8 @@ Default: no config file → everything below at its default (all transforms on, 
     "encryptStrings": true,
     "deadCode": true,
     "integerObfuscation": true,
-    "flowShuffle": true
+    "flowShuffle": true,
+    "flowFlatten": true
   },
   "strings": {
     "minLength": 2,
@@ -87,7 +88,8 @@ Default: no config file → everything below at its default (all transforms on, 
   "hardening": {
     "maxOverhead": 2.0,
     "deadBranchesPerMethod": 3,
-    "flowSplitsPerMethod": 6
+    "flowSplitsPerMethod": 6,
+    "flattenMaxBlocks": 128
   }
 }
 ```
@@ -104,6 +106,7 @@ Default: no config file → everything below at its default (all transforms on, 
 | `hardening.maxOverhead` | Growth cap for the noise transforms: each method gains at most `(maxOverhead − 1) × its size` extra instructions. `2.0` = up to double the instructions. |
 | `hardening.deadBranchesPerMethod` | Max decoy blocks `DeadCode` inserts per method. |
 | `hardening.flowSplitsPerMethod` | Max edits `FlowShuffle` performs per method (splits + perturbations + inversions). |
+| `hardening.flattenMaxBlocks` | Methods with more basic blocks than this stay unflattened (default `128`; also capped at 2000 instructions). |
 
 ## Keep rules — what is never renamed
 
@@ -155,8 +158,15 @@ watermark field before renaming) show up under their generated names.
   v53+); every decryptor is `ACC_SYNTHETIC`. Interfaces older than class-file v52 are promoted
   to v52 when a decryptor is injected (static interface methods need v52; the output targets
   Java 8+ anyway).
-- **Constructors** get `DeadCode` only after the `super()` / `this()` call, and `FlowShuffle`
-  leaves them alone entirely.
+- **Constructors** get `DeadCode` only after the `super()` / `this()` call, and `FlowShuffle` /
+  `FlowFlatten` leave them alone entirely.
+- **`FlowFlatten` coverage is deliberately bounded**: methods with try/catch (including
+  `synchronized` blocks), constructors, artificials, JSR/RET, more than 2000 instructions, more
+  than `flattenMaxBlocks` blocks, or any branch target that carries values on the operand stack
+  (ternaries and short-circuit expressions routinely do) stay unflattened. Spilling those values
+  to locals is a future enhancement; the skip rules are what keep the transform verifier-safe.
+- Flattening drops the `LocalVariableTable` of rewritten methods (block reordering invalidates its
+  ranges); the default pipeline strips those tables anyway.
 - **Noise transforms are budgeted, not maximal** — they trade size for readability, capped by
   `hardening.*`. Raise `maxOverhead` at the cost of jar size.
 - Missing `-lib` dependencies make the renamer conservative (more anchors), never wrong; resolve

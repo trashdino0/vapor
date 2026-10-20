@@ -46,7 +46,7 @@ java -jar build\libs\vapor-0.2.0.jar -i app.jar -o app-obf.jar -config vapor.jso
 | `StringEncryptor` | Replaces `LDC` string constants (length ≥ `strings.minLength`) with an encoded constant + per-string key + a call to a synthetic per-class decryptor. **Polymorphic**: each class gets one of 12 decryptor bodies (4 math shapes × 3 loop forms). Since v3.1 it also rewrites `invokedynamic` string-concat call sites into decryptor-backed `StringBuilder` chains, so recipe literals leave the class file too. |
 | `DeadCode` | Inserts opaque-predicate-guarded decoy blocks at stack-empty points (never before `super()` in constructors). All junk is side-effect-free even if executed. |
 | `FlowShuffle` | Control-flow noise: guard splits, condition perturbation (`(x)` → `(x ^ 0)`), jump inversion. Constructors are left alone. |
-| `IntObfuscation` | Rewrites every real int/long constant push as `v ^ k` with a per-site key. Runs last so constants injected by other transforms are covered too. |
+| `IntObfuscation` | Rewrites every real int/long/float/double constant push as `v ^ k` with a per-site key (floats/doubles go through their raw bits + `intBitsToFloat`/`longBitsToDouble`; NaN is skipped to keep payload bits exact). Runs last so constants injected by other transforms are covered too. |
 | `Watermark` | Optionally embeds the configured watermark as a private synthetic constant in one deterministic class. |
 | `ResourceFixups` | Rewrites `Main-Class` / `Launcher-Agent-Class` / `Agent-Class` and `META-INF/services/*` (file name and provider lines) to follow the mapping. |
 | `MappingExport` | Writes a ProGuard-style mapping (classes, then fields, then methods with readable signatures). |
@@ -98,7 +98,7 @@ Default: no config file → everything below at its default (all transforms on, 
 | `failsafe` | `true` (default): a renaming failure logs a warning and the jar is written **un-renamed** instead of the run failing. `false`: the exception propagates. |
 | `keep` | Class-name globs in dotted form, `*` and `?` supported (`com.example.*`). Kept classes keep their names **and** all their declared members; CLI `-keep` adds to this list. |
 | `watermark` | Optional string. Embedded as a `ConstantValue` in a deterministic class; findable with `javap -v` / `strings` (it is deliberately **not** encrypted). |
-| `transformers.*` | Per-transform switches — see the table above. |
+| `transformers.*` | Per-transform switches — see the table above (`integerObfuscation` covers all numeric constants: int, long, float, double). |
 | `strings.minLength` | Strings shorter than this stay in plaintext (tiny strings are not worth a call site). |
 | `strings.polymorphic` | `true` (default): per-class decryptor body picked among 12 shapes. `false`: the classic XOR/forward decryptor (smallest output). |
 | `hardening.maxOverhead` | Growth cap for the noise transforms: each method gains at most `(maxOverhead − 1) × its size` extra instructions. `2.0` = up to double the instructions. |
@@ -157,7 +157,6 @@ watermark field before renaming) show up under their generated names.
   Java 8+ anyway).
 - **Constructors** get `DeadCode` only after the `super()` / `this()` call, and `FlowShuffle`
   leaves them alone entirely.
-- **Float/double constants are not obfuscated** (int/long only, for now).
 - **Noise transforms are budgeted, not maximal** — they trade size for readability, capped by
   `hardening.*`. Raise `maxOverhead` at the cost of jar size.
 - Missing `-lib` dependencies make the renamer conservative (more anchors), never wrong; resolve

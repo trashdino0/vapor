@@ -378,6 +378,11 @@ Artifacts for inspection: `%TEMP%\opencode\vapor-rig\hello-21\` and `...\legacy8
   `([C)` / `(Ljava/lang/Object;)` sites, interface site), three rigs green (hardening now carries
   the `concat-recipe-marker` plaintext marker and prints a concat line), determinism
   byte-identical across runs.
+- v3.2: `IntObfuscation` now also rewrites `FCONST_*`/`DCONST_*`/`LDC Float|Double` through
+  their raw bits + `intBitsToFloat`/`longBitsToDouble`; NaN constants are skipped so payload
+  bits stay exact. `IntObfuscationTest` compares floats/doubles bit-for-bit (so `-0.0` cannot
+  pass as `0.0`) and asserts NaNs are untouched. Verified: 22/22 tests, three rigs green,
+  determinism byte-identical.
 
 ## Decisions log (short)
 

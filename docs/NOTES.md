@@ -241,7 +241,9 @@ Shadow `com.gradleup.shadow` 9.6.1 · Gradle 9.8.1 · Java toolchain 21.
   near the head re-enters after the store — so the salt is always initialized before any use.
 - `IntObfuscation` is stack-neutral per push (`v ^ k`, `k`, `IXOR`) so it needs no analysis at
   all; it runs LAST in the pipeline so constants introduced by earlier transforms are obfuscated
-  too. Float/double deferred to v3.
+  too. Since v3.2 it covers float/double via raw bits (`(bits ^ k)`, `k`, XOR,
+  `Float.intBitsToFloat` / `Double.longBitsToDouble`); NaN constants are skipped so their payload
+  bits stay exact, while `-0.0`, infinities and denormals round-trip exactly through the bit XOR.
 - Polymorphic `StringEncryptor`: 12 shapes — math ∈ {XOR, add, mul, byte-swap} × loop ∈ {forward
   `if_icmpge`, backward `iflt` from `len−1`, equality-terminated}. Shape pick:
   `Mix.of(seed, class, "<decryptor>", 0x5A17)` → `pick % 4`, `(pick >>> 8) % 3`.
@@ -324,6 +326,19 @@ huge methods far beyond the samples.
   primitive width, char[]/Object/String/null, surrogate pair, control-char skip, interface site)
   + plaintext scan of the class file + the hardening rig marker `concat-recipe-marker`. Identity
   hashes of fresh `char[]` must be normalized in differential transcripts (differ per invocation).
+
+### v3.2 — float/double constants (`IntObfuscation`)
+
+- Same stack-neutral pattern as int/long, on raw bits:
+  `push (floatToRawIntBits(v) ^ k); push k; ixor; invokestatic Float.intBitsToFloat(I)F`
+  (doubles analogous through `Double.longBitsToDouble(J)D`). Covers `FCONST_0/1/2`,
+  `DCONST_0/1` and `LDC Float/Double`.
+- NaN is skipped deliberately: XORing a NaN's bits changes the payload and `floatToRawIntBits`
+  would observe it. Everything else (-0.0, infinities, denormals, `MIN_VALUE`/`MAX_VALUE`)
+  round-trips bit-exactly; the test compares raw bits, not `==` (so `-0.0` cannot masquerade as
+  `0.0`).
+- No new config switch: `transformers.integerObfuscation` now means "numeric constants" (int,
+  long, float, double). Naming kept for compatibility; documented in the README.
 
 ## Reference-tool findings (from the earlier REA investigation — for Phase 2+)
 

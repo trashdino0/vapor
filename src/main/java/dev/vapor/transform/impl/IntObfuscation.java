@@ -13,27 +13,31 @@ import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 
 /**
- * v2: constant obfuscation. Every int/long constant that is <em>pushed on the
- * stack</em> becomes an exclusive-or against a per-site key:
+ * v2/v3.2: constant obfuscation. Every int/long/float/double constant that is
+ * <em>pushed on the stack</em> becomes an exclusive-or against a per-site key:
  *
  * <pre>
- *   iconst_3
- *   -&gt;
- *   push (3 ^ key); push key; ixor        // still 3 at runtime, no plain 3 anywhere
+ *   iconst_3                        ldc 3.25f
+ *   -&gt;                              -&gt;
+ *   push (3 ^ key); push key; ixor   push (bits ^ key); push key; ixor;
+ *                                    invokestatic Float.intBitsToFloat
  * </pre>
  *
  * <p>Only real constant push instructions are touched ({@code ICONST_*},
- * {@code LCONST_*}, {@code BIPUSH}, {@code SIPUSH}, {@code LDC int/long}).
- * Constants that are not stack pushes are untouched by construction: switch
- * keys and bounds ({@code tableswitch}/{@code lookupswitch} are their own node
- * types), {@code iinc} operands, array dimensions ({@code multianewarray} node),
- * {@code newarray} types, and invokedynamic/bootstrap arguments. Float/double
- * constants are left for v3.</p>
+ * {@code LCONST_*}, {@code FCONST_*}, {@code DCONST_*}, {@code BIPUSH},
+ * {@code SIPUSH}, {@code LDC int/long/float/double}). Constants that are not
+ * stack pushes are untouched by construction: switch keys and bounds
+ * ({@code tableswitch}/{@code lookupswitch} are their own node types),
+ * {@code iinc} operands, array dimensions ({@code multianewarray} node),
+ * {@code newarray} types, and invokedynamic/bootstrap arguments. NaN constants
+ * are skipped so their raw payload bits stay bit-exact (everything else,
+ * including -0.0 and infinities, round-trips exactly through the bit XOR).</p>
  *
- * <p>The rewrite is a pure stack-neutral replacement (consumes nothing,
+ * <p>Each rewrite is a pure stack-neutral replacement (consumes nothing,
  * produces the same single value), so it cannot disturb control flow, exception
  * ranges or frames, and no stack analysis is needed. Budgeted with
  * {@code hardening.maxOverhead}; artificial methods (string decryptors) are
@@ -98,7 +102,18 @@ public final class IntObfuscation extends Transformer {
             AbstractInsnNode next = insn.getNext();
             Integer intValue = pushIntValue(insn);
             Long longValue = intValue != null ? null : pushLongValue(insn);
-            if (intValue == null && longValue == null) {
+            Float floatValue = intValue != null || longValue != null ? null : pushFloatValue(insn);
+            Double doubleValue = intValue != null || longValue != null || floatValue != null
+                    ? null : pushDoubleValue(insn);
+            if (intValue == null && longValue == null && floatValue == null && doubleValue == null) {
+                insn = next;
+                continue;
+            }
+            if (floatValue != null && Float.isNaN(floatValue)) {
+                insn = next; // keep NaN payloads bit-exact
+                continue;
+            }
+            if (doubleValue != null && Double.isNaN(doubleValue)) {
                 insn = next;
                 continue;
             }
@@ -108,8 +123,12 @@ public final class IntObfuscation extends Transformer {
             int key = Mix.of(config.seed, owner.name, method.name + method.desc, site++);
             if (intValue != null) {
                 replaceInt(method, insn, intValue, key);
-            } else {
+            } else if (longValue != null) {
                 replaceLong(method, insn, longValue, key);
+            } else if (floatValue != null) {
+                replaceFloat(method, insn, floatValue, key);
+            } else {
+                replaceDouble(method, insn, doubleValue, key);
             }
             added += 2;
             insn = next;
@@ -146,6 +165,33 @@ public final class IntObfuscation extends Transformer {
         return null;
     }
 
+    /** @return the pushed value if this instruction pushes a float constant, else null. */
+    private static Float pushFloatValue(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode >= Opcodes.FCONST_0 && opcode <= Opcodes.FCONST_2) {
+            return (float) (opcode - Opcodes.FCONST_0);
+        }
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Float value) {
+            return value;
+        }
+        return null;
+    }
+
+    /** @return the pushed value if this instruction pushes a double constant, else null. */
+    private static Double pushDoubleValue(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode == Opcodes.DCONST_0) {
+            return 0.0d;
+        }
+        if (opcode == Opcodes.DCONST_1) {
+            return 1.0d;
+        }
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Double value) {
+            return value;
+        }
+        return null;
+    }
+
     private static void replaceInt(MethodNode method, AbstractInsnNode insn, int value, int key) {
         InsnList list = new InsnList();
         Insns.pushInt(list, value ^ key);
@@ -161,6 +207,29 @@ public final class IntObfuscation extends Transformer {
         list.add(Insns.longNode(value ^ longKey));
         list.add(Insns.longNode(longKey));
         list.add(new InsnNode(Opcodes.LXOR));
+        method.instructions.insertBefore(insn, list);
+        method.instructions.remove(insn);
+    }
+
+    private static void replaceFloat(MethodNode method, AbstractInsnNode insn, float value, int key) {
+        int bits = Float.floatToRawIntBits(value);
+        InsnList list = new InsnList();
+        Insns.pushInt(list, bits ^ key);
+        Insns.pushInt(list, key);
+        list.add(new InsnNode(Opcodes.IXOR));
+        list.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Float", "intBitsToFloat", "(I)F", false));
+        method.instructions.insertBefore(insn, list);
+        method.instructions.remove(insn);
+    }
+
+    private static void replaceDouble(MethodNode method, AbstractInsnNode insn, double value, int key) {
+        long bits = Double.doubleToRawLongBits(value);
+        long longKey = ((long) key << 32) | (key & 0xFFFFFFFFL);
+        InsnList list = new InsnList();
+        list.add(Insns.longNode(bits ^ longKey));
+        list.add(Insns.longNode(longKey));
+        list.add(new InsnNode(Opcodes.LXOR));
+        list.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Double", "longBitsToDouble", "(J)D", false));
         method.instructions.insertBefore(insn, list);
         method.instructions.remove(insn);
     }

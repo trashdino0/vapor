@@ -214,6 +214,82 @@ Full block flattening (dispatcher, needs CFG permutation + value analysis), refe
 obfuscation, integrity verification (hash checks), class/field salting bloat, anti-debug,
 virtualization.
 
+## Vapor v3 — Coverage & Control Flow (planned 2026-10-19)
+
+**Goal**: close the two visible coverage gaps (indy string-concat literals staying plaintext,
+float/double constants untouched) and add the first real control-flow transform (bounded
+flattening) — keeping the v1/v2 envelope: deterministic, failsafe, budgeted, verified by tests,
+rigs and the self-hosting stress run. Commit-per-phase is back on (v3.0 re-established git).
+
+### Deliverables
+
+| # | Feature | Transformer | Default |
+|---|---|---|---|
+| v3.1 | Encrypt `invokedynamic` string-concat literals | `StringEncryptor` upgrade | on |
+| v3.2 | Float / double constant obfuscation | `IntObfuscation` upgrade | on |
+| v3.3 | Bounded control-flow flattening (dispatcher + block permutation) | `FlowFlatten` | on |
+
+### Phases (each ends at a green rig + a commit)
+
+**v3.0 — hygiene**: `git init`, `.gitignore` (playground outputs + third-party jars stay
+untracked), baseline commit; commit-per-phase from here on.
+
+**v3.1 — concat literals**: for every `invokedynamic` call site whose bootstrap is
+`StringConcatFactory.makeConcatWithConstants`, replace the call with an explicit `StringBuilder`
+chain:
+
+1. pop the call-site arguments into fresh locals (reverse order; slot types from the descriptor:
+   Z/B/C/S/I → `ISTORE`, J/F/D, references → `ASTORE`);
+2. build: `new StringBuilder()`, then per recipe component: literal → `LDC enc; push key;
+   invokestatic <decryptor>` + `append(String)` (literals below `strings.minLength` stay plain
+   `LDC`); dynamic arg → load local + the `append` overload matching the descriptor type
+   (primitives by width; `String`/`CharSequence`/`char[]`/`Object` exactly);
+3. `toString()`.
+
+Failsafe: skip the call site if the recipe contains `\u0002` non-string constants, references an
+argument index outside the descriptor, or anything else doesn't parse. Record `ObjectMethods`
+bootstraps are never touched; `makeConcat` (no recipe) stays untouched. The writer drops
+unreferenced `BootstrapMethods` entries, so the recipe text leaves the class file entirely.
+
+**v3.2 — float/double constants**: same bits-XOR split as int/long —
+`push (bits ^ k); push k; IXOR; invokestatic Float.intBitsToFloat(I)F` /
+`Double.longBitsToDouble(J)D`. Covers `FCONST_*` / `DCONST_*` / `LDC Float|Double`; exact bits
+are preserved for all finite values and infinities (documented exception: NaN payload bits are
+not preserved bit-for-bit — still NaN, but a distinct NaN pattern; acceptable).
+
+**v3.3 — bounded flattening**: per method (skipped: `<init>`, artificials, anything with
+try/catch (this also covers `synchronized`), JSR/RET, methods whose block entries ever carry a
+non-empty stack per ASM `Analyzer`, > `hardening.flattenMaxBlocks` blocks, > 2000 instructions,
+straight-line methods):
+
+```
+state = <start>;
+loop:  switch (state) { case i: block_i ... }
+```
+
+each block keeps its original body; its terminator becomes a state assignment + `goto loop`
+(conditionals branch to two tiny assignment trampolines); RETURN/ATHROW stay as-is. Physical
+block order in the switch body is permuted by a seeded `Mix.Rand`, state numbers follow the
+permutation; the default switch target throws `IllegalStateException` (defense in depth).
+Frames are recomputed at write time; behavior is proven by the differential-execution harness
+(extended fixture), the three rigs and the CFR self-hosting stress run.
+
+**v3.4 — stress + docs**: full acceptance (tests, rigs ×3 incl. decompile, determinism,
+LoadCheck + CFR self-decompile on the new pipeline), README/PROGRESS/NOTES updates.
+
+### Config additions
+
+```json
+"transformers": { "flowFlatten": true },
+"hardening":    { "flattenMaxBlocks": 128 }
+```
+
+### v3 candidates (still deferred)
+
+Salting (decoy class/member bloat), reference/proxy obfuscation, anti-tamper/hash checks,
+`module-info`-aware renaming for modular jars, `ConstantValue` / annotation-value encryption,
+virtualization/native.
+
 ## Non-goals for v1/v2
 
 Full control-flow flattening, salting/hash-integrity, reference/proxy obfuscation, anti-debug,

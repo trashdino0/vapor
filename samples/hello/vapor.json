@@ -1,0 +1,4 @@
+{
+  "keep": ["dev.sample.EnglishGreeter"],
+  "watermark": "vapor-rig-watermark-2026"
+}

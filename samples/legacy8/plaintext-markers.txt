@@ -1,0 +1,7 @@
+# Plaintext markers: LDC string constants that must NOT survive obfuscation.
+=== vapor sample: legacy8 ===
+=== done ===
+sum=
+Rusty
+vegetable
+unknown

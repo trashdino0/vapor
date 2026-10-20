@@ -1,0 +1,21 @@
+# Aidsfuscator v2.10.0
+Very big update...
+
+## What's new?
+- Added flow ints (`flowInts`). This transformer ensures control flow integrity, making inserting GOTO statements to the required part of code much harder. Obfuscationg `long` values is optional. The `separateBlocks` allows for further strengthening when used in conjunction with control flow flattening. With this setting enabled, control flow flattening adds around 2x more cases to dispatcher switches (and might add more dispatcher switches).
+- Added class hash integrity obfuscation (`hashIntegrity`). Uses a classes hash to obfuscate constants. Modify the class = break constants (same goes for recompilation, copypasting, etc.).
+- Added a new setting to Control Flow Flattening, which uses the variable used by the dispatcher switch to obfuscate integers. Also somewhat ensures control flow integrity.
+- Made constant pushes use OR (|) gate instead of AND (&) - safer.
+- Enhanced string encryption by adding a new string initializer. 
+- Enhanced integer encryption by adding a new integer initializer.
+- Made all string and initeger initializers somewhat more resistant to pattern matching.
+- Enhanced string encryption by adding a new string decryptor (Mostly polymorphic!).
+- Improved unused member trimming (thanks dramatically).
+- Improved handling of fabric.mod.json files.
+- Multiple codebase and stability enhancements.
+- Added post-processing optimization pass that gets rid of unused variables.
+- Added post-processing optimization pass that moves re-used integers to local variables.
+- Fixed an issue with method renaming and method salting where tow methods with the same indentity from two unrelated classes could name-clash. (thanks @apkreader)
+- String and integer encryption methods now get flow obfuscated.
+- String encryption decryptors are now customizable
+- Several other changes.

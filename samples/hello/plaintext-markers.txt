@@ -1,0 +1,15 @@
+# Plaintext markers: LDC string constants that must NOT survive obfuscation.
+# The rig scans every entry of the obfuscated jar for these substrings.
+# Rules for adding markers:
+#   - no fragments of string-concat recipes ("x=" + y) — javac keeps the recipe text as an
+#     invokedynamic bootstrap argument, which v1 deliberately does not encrypt;
+#   - no substrings of class names, package names, manifests or resources (those legitimately
+#     survive for kept classes / resources).
+=== vapor sample: hello ===
+=== done ===
+dev.sample.EnglishGreeter
+dev.sample.FancyGreeter
+vegetable
+fruit
+%d-%s
+hi

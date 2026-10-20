@@ -10,9 +10,9 @@
 - Gradle 9.8.1 was downloaded to `%TEMP%\opencode\gradle-9.8.1\bin\gradle.bat` (temp — may
   vanish). The project has a wrapper: prefer `.\gradlew.bat <task>`. First wrapper run downloads
   the dist into `~/.gradle/wrapper/dists/` (one-time, ~130 MB).
-- Build: `.\gradlew.bat build` → fat jar `build\libs\vapor-0.2.0.jar` (`shadowJar` alone builds
+- Build: `.\gradlew.bat build` → fat jar `build\libs\vapor-0.3.0.jar` (`shadowJar` alone builds
   just the jar).
-- Run: `java -jar build\libs\vapor-0.2.0.jar -i in.jar -o out.jar`
+- Run: `java -jar build\libs\vapor-0.3.0.jar -i in.jar -o out.jar`
 - Rig: `.\scripts\rig.ps1 -Sample hello` / `-Sample legacy8` / `-Sample hardening`; `-Build`
   builds first; `-SkipDecompile` for speed. Workspace:
   `%TEMP%\opencode\vapor-rig\<sample>-<release>\` with
@@ -284,7 +284,7 @@ Shadow `com.gradleup.shadow` 9.6.1 · Gradle 9.8.1 · Java toolchain 21.
 ### Stress-test recipe (the strongest correctness gate we have)
 
 ```
-java -jar build\libs\vapor-0.2.0.jar -i cfr.jar -o cfr-obf.jar        # full v2 defaults
+java -jar build\libs\vapor-0.3.0.jar -i cfr.jar -o cfr-obf.jar        # full v3 defaults
 java -Xverify:all tools\LoadCheck.java cfr-obf.jar                     # expect 0 failures
 java -jar cfr-obf.jar <some.jar> --outputdir dec-obf                   # run the obfuscated CFR
 java -jar tools\cfr-0.152.jar <some.jar> --outputdir dec-base          # baseline

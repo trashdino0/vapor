@@ -19,6 +19,7 @@
 | V3 | Control-flow noise (`FlowShuffle`) | ✅ Done (2026-10-18) |
 | V4 | Polymorphic string decryptors | ✅ Done (2026-10-18) |
 | V5 | Stress test + docs | ✅ Done (2026-10-18) |
+| v3.0–v3.4 | v3: coverage & control flow (0.3.0) | ✅ Done (2026-10-19) |
 
 **v1 is complete** — renaming + metadata hygiene + string encryption (+ watermark), rig-verified
 on Java 21 and Java 8 samples.
@@ -27,7 +28,10 @@ on Java 21 and Java 8 samples.
 obfuscation, flow noise and polymorphic decryptors. All transforms are dependency-free
 (in-place insertions only), deterministic, budgeted, and verified by executable unit tests plus a
 self-hosting stress test (obfuscated CFR decompiles its own obfuscated jar byte-identically).
-v3 territory (flattening, reference obfuscation, anti-debug, virtualization) stays deferred.
+
+**v3 (coverage & control flow) is complete (0.3.0)** — concat-recipe encryption, float/double
+constants and bounded control-flow flattening on top of the v2 envelope. Reference obfuscation,
+anti-tamper, salting and virtualization remain deferred (PLAN.md).
 
 ## Phase 0 — Bootstrap ✅ (2026-10-17)
 
@@ -394,6 +398,11 @@ Artifacts for inspection: `%TEMP%\opencode\vapor-rig\hello-21\` and `...\legacy8
   `FlowFlatten` adds a `flattened=` line to the hardening rig (1 method flattened there);
   stress on CFR 1302 classes: LoadCheck 0 failures, obfuscated CFR exit 0, 733/733 decompiled
   files byte-identical; hardening output deterministic.
+- v3.4 (release `0.3.0`): final acceptance on the release jar — 24/24 tests; three rigs green
+  (hello 8 markers absent, legacy8 6, hardening 7 + `flattened=` line, all behaviors identical,
+  decompiles produced); CFR stress re-run: 1302 classes, 0 verification failures, obfuscated CFR
+  exit 0, 733/733 self-decompile files byte-identical; hardening output deterministic
+  (ratio unchanged, new hash includes flattening). README/NOTES/PLAN updated to 0.3.0.
 
 ## Decisions log (short)
 

@@ -214,7 +214,7 @@ Full block flattening (dispatcher, needs CFG permutation + value analysis), refe
 obfuscation, integrity verification (hash checks), class/field salting bloat, anti-debug,
 virtualization.
 
-## Vapor v3 — Coverage & Control Flow (v3.1–v3.3 shipped 2026-10-19; v3.4 acceptance pending)
+## Vapor v3 — Coverage & Control Flow (v3.1–v3.4 shipped 2026-10-19, release 0.3.0)
 
 **Goal**: close the two visible coverage gaps (indy string-concat literals staying plaintext,
 float/double constants untouched) and add the first real control-flow transform (bounded
@@ -243,7 +243,8 @@ chain:
 2. build: `new StringBuilder()`, then per recipe component: literal → `LDC enc; push key;
    invokestatic <decryptor>` + `append(String)` (literals below `strings.minLength` stay plain
    `LDC`); dynamic arg → load local + the `append` overload matching the descriptor type
-   (primitives by width; `String`/`CharSequence`/`char[]`/`Object` exactly);
+   (primitives by width; **every** reference type — including `String`/`char[]` — uses
+   `append(Object)`, matching the factory's `String.valueOf` semantics);
 3. `toString()`.
 
 Failsafe: skip the call site if the recipe contains `\u0002` non-string constants, references an
@@ -274,8 +275,9 @@ permutation; the default switch target throws `IllegalStateException` (defense i
 Frames are recomputed at write time; behavior is proven by the differential-execution harness
 (extended fixture), the three rigs and the CFR self-hosting stress run.
 
-**v3.4 — stress + docs**: full acceptance (tests, rigs ×3 incl. decompile, determinism,
-LoadCheck + CFR self-decompile on the new pipeline), README/PROGRESS/NOTES updates.
+**v3.4 — stress + docs**: ✅ full acceptance (24/24 tests, rigs ×3 incl. decompile, determinism,
+LoadCheck + CFR self-decompile on the release jar), version bumped to `0.3.0`,
+README/PROGRESS/NOTES updates.
 
 ### Config additions
 

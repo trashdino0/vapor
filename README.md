@@ -25,7 +25,7 @@ options:
 
 ```
 .\gradlew.bat build          # tests + shadow jar
-# → build\libs\vapor-0.2.0.jar
+# → build\libs\vapor-0.3.0.jar
 ```
 
 Requires JDK 21 to build (the output supports Java 8–21 class files; every class is written with
@@ -34,7 +34,7 @@ Requires JDK 21 to build (the output supports Java 8–21 class files; every cla
 ## Example
 
 ```
-java -jar build\libs\vapor-0.2.0.jar -i app.jar -o app-obf.jar -config vapor.json -mapping mapping.txt
+java -jar build\libs\vapor-0.3.0.jar -i app.jar -o app-obf.jar -config vapor.json -mapping mapping.txt
 ```
 
 ## What Vapor does

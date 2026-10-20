@@ -69,6 +69,9 @@ every jar).
   `0x519C08D6 ^ 0x3953F42D`-style pairs.
 - **Dead code + flow noise** — decoy `if (...)` blocks that never run, perturbed
   conditions (`x != (1 ^ 1)`), inverted jumps (`while (true) { if (...) break; }`).
+- **Control-flow flattening** — eligible methods (no try/catch, no values live across
+  branches) are reorganized into a `switch` state machine with random state values; CFR
+  will show `switch (state)` from the decoded bytecode.
 - **Polymorphic decryptors** — different classes get different decryptor shapes
   (XOR / add / multiply / byte-swap × 3 loop forms); compare two renamed classes.
 

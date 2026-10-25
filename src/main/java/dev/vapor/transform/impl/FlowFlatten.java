@@ -27,17 +27,20 @@ import org.objectweb.asm.tree.analysis.AnalyzerException;
 import org.objectweb.asm.tree.analysis.BasicInterpreter;
 import org.objectweb.asm.tree.analysis.BasicValue;
 import org.objectweb.asm.tree.analysis.Frame;
+import org.objectweb.asm.tree.analysis.Interpreter;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
- * v3.3: bounded control-flow flattening.
+ * v3.3+: bounded control-flow flattening (v3.6 adds entry-stack spilling).
  *
  * <p>An eligible method becomes a state machine. Every block is moved into a
  * dispatcher section and reached only through a {@code lookupswitch} on a state
@@ -48,16 +51,23 @@ import java.util.Set;
  * <p><b>Safety rules</b> (verifier constraints, informed by the reference study of
  * Aidsfuscator's flattening):</p>
  * <ul>
- *   <li><b>Empty entry stacks only.</b> A dispatcher is a frame-merge point; a block
- *       that expects values on the stack cannot be reached through it. Methods with
- *       any such block are skipped wholesale (ternaries and short-circuit
- *       expressions routinely leave values live across branches).</li>
+ *   <li><b>Entry stacks are spilled.</b> A dispatcher is a frame-merge point and must
+ *       see an empty operand stack, but a block may expect values on the stack
+ *       (ternaries and short-circuit expressions routinely leave values live across a
+ *       branch). Every edge into such a block stores the incoming values into fresh
+ *       locals; the target block reloads them inside its case. Dispatchers are grouped
+ *       by local <em>and</em> entry-stack signature, and every edge into a group writes
+ *       all of its spill locals, so the loop-head merge stays typed.</li>
  *   <li><b>One dispatcher per frame signature.</b> The switch merges the frames of
  *       all paths that reach it; blocks with different local types must not share a
  *       dispatcher or the merged frame would be weaker than what the block's code
  *       verifies against. Signatures are computed with an <em>exact-type</em>
  *       interpreter — ASM's {@code BasicInterpreter} collapses every reference type
- *       to {@code Object} and would be unsound here.</li>
+ *       to {@code Object} and would be unsound here. Uninitialized {@code NEW}
+ *       values are tracked by allocation site and transition to their initialized type
+ *       at {@code <init>} (as the verifier does), so two different {@code new}
+ *       instructions never share a spill slot and a value stored after construction
+ *       keeps its real frame type.</li>
  *   <li><b>Random, non-sequential states.</b> Unique ints from {@link Mix}, not
  *       {@code 0..n}; the default case throws {@code IllegalStateException}
  *       (defense in depth).</li>
@@ -73,7 +83,10 @@ public final class FlowFlatten extends Transformer {
     private static final int MIN_BLOCKS = 3;
     private static final int MAX_INSTRUCTIONS = 2000;
 
-    /** Set {@code -Dvapor.debugFlatten=true} to log per-method skip reasons on stderr. */
+    /**
+     * Set {@code -Dvapor.debugFlatten=true} to log per-method skip reasons on stderr; add
+     * {@code -Dvapor.debugFlattenMethod=<name>} to dump one method's block signatures and groups.
+     */
     private static final boolean DEBUG = Boolean.getBoolean("vapor.debugFlatten");
 
     private final VaporConfig config;
@@ -151,9 +164,16 @@ public final class FlowFlatten extends Transformer {
 
         IHierarchy hierarchy = context == null ? null : context.hierarchy();
         ensureMaxLocals(method);
+        Map<AbstractInsnNode, Integer> newIds = new IdentityHashMap<>();
+        int nextNew = 0;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn.getOpcode() == Opcodes.NEW) {
+                newIds.put(insn, nextNew++);
+            }
+        }
         Frame<BasicValue>[] frames;
         try {
-            frames = new Analyzer<>(new MergeInterpreter(hierarchy)).analyze(owner.name, method);
+            frames = new InitAnalyzer(new MergeInterpreter(hierarchy, newIds)).analyze(owner.name, method);
         } catch (AnalyzerException e) {
             skip(method, "analyzer: " + e.getMessage());
             return;
@@ -171,11 +191,30 @@ public final class FlowFlatten extends Transformer {
                 skip(method, "unreachable block " + i);
                 return;
             }
-            if (frame.getStackSize() != 0) {
-                skip(method, "block " + i + " entry stack size " + frame.getStackSize());
-                return; // values live across a branch: skip method
-            }
             block.frame = frame;
+            int stackSize = frame.getStackSize();
+            block.stackTypes = new Type[stackSize];
+            StringBuilder stackSignature = new StringBuilder(stackSize * 8);
+            for (int slot = 0; slot < stackSize; slot++) {
+                BasicValue value = frame.getStack(slot);
+                Type type = value == null ? null : value.getType();
+                if (type == null || type.getSort() == Type.METHOD || type.getSort() == Type.VOID) {
+                    skip(method, "unsupported stack value in block " + i);
+                    return;
+                }
+                block.stackTypes[slot] = type;
+                if (value instanceof UninitializedValue uninitialized) {
+                    stackSignature.append('U').append(uninitialized.id);
+                } else {
+                    stackSignature.append(type.getDescriptor());
+                }
+                stackSignature.append(';');
+            }
+            block.stackSignature = stackSignature.toString();
+        }
+        if (blocks.get(0).stackTypes.length != 0) {
+            skip(method, "non-empty entry stack");
+            return;
         }
         if (!resolve(blocks, labelBlocks)) {
             skip(method, "edge resolution");
@@ -193,13 +232,13 @@ public final class FlowFlatten extends Transformer {
             keys[i] = candidate;
         }
 
-        // One dispatcher per entry-frame signature, ordered by first block use. With hierarchy
+        // One dispatcher per local+stack signature, ordered by first block use. With hierarchy
         // knowledge (the pipeline) the merge matches the verifier, so TOP slots may group;
         // without it (unit fixtures) an ambiguous merge still gets a private dispatcher.
         Map<String, List<Integer>> grouped = new LinkedHashMap<>();
         for (int i = 0; i < blocks.size(); i++) {
-            String signature = signature(blocks.get(i).frame, hierarchy != null);
-            String key = signature == null ? "#" + i : signature;
+            String locals = signature(blocks.get(i).frame, hierarchy != null);
+            String key = locals == null ? "#" + i : locals + "||" + blocks.get(i).stackSignature;
             grouped.computeIfAbsent(key, ignored -> new ArrayList<>()).add(i);
         }
         List<List<Integer>> groups = new ArrayList<>(grouped.values());
@@ -210,8 +249,53 @@ public final class FlowFlatten extends Transformer {
             }
         }
 
+        String debugTarget = System.getProperty("vapor.debugFlattenMethod");
+        if (DEBUG && debugTarget != null && debugTarget.equals(method.name)) {
+            System.err.println("[flatten-target] " + owner.name + "." + method.name + method.desc
+                    + " maxLocals=" + method.maxLocals + " blocks=" + blocks.size());
+            for (int group = 0; group < groups.size(); group++) {
+                System.err.println("[flatten-target] group " + group + " = " + groups.get(group));
+            }
+            for (int i = 0; i < blocks.size(); i++) {
+                Block block = blocks.get(i);
+                System.err.println("[flatten-target] block " + i + " group=" + groupOf.get(i)
+                        + " stack=" + block.stackSignature
+                        + " locals=" + signature(block.frame, hierarchy != null)
+                        + " successors=" + java.util.Arrays.toString(block.successors));
+            }
+        }
+
+        // Spill locals are shared by every block of a group (same entry-stack shape) and are
+        // written on every edge into the group, so the loop-head merge keeps their types.
         int stateSlot = method.maxLocals;
-        method.maxLocals = stateSlot + 1;
+        int cursor = stateSlot + 1;
+        int spilled = 0;
+        for (List<Integer> members : groups) {
+            Block first = blocks.get(members.get(0));
+            int count = first.stackTypes.length;
+            if (count == 0) {
+                continue;
+            }
+            int[] slots = new int[count];
+            for (int slot = 0; slot < count; slot++) {
+                slots[slot] = cursor;
+                cursor += first.stackTypes[slot].getSize();
+                spilled++;
+            }
+            if (cursor > 65535) {
+                skip(method, "spill local overflow");
+                return;
+            }
+            for (int member : members) {
+                Block block = blocks.get(member);
+                if (block.stackTypes.length != count) {
+                    skip(method, "inconsistent spill shape");
+                    return;
+                }
+                block.spillLocals = slots;
+            }
+        }
+        method.maxLocals = cursor;
 
         LabelNode[] blockLabels = new LabelNode[blocks.size()];
         for (int i = 0; i < blockLabels.length; i++) {
@@ -230,7 +314,7 @@ public final class FlowFlatten extends Transformer {
             original.remove(original.getFirst());
         }
 
-        Emitter emitter = new Emitter(stateSlot, keys, groupOf, loopLabels);
+        Emitter emitter = new Emitter(stateSlot, keys, groupOf, loopLabels, blocks);
         InsnList out = new InsnList();
         out.add(Insns.intNode(keys[0]));
         out.add(new VarInsnNode(Opcodes.ISTORE, stateSlot));
@@ -261,7 +345,7 @@ public final class FlowFlatten extends Transformer {
             out.add(new LookupSwitchInsnNode(defaultLabels[group], caseKeys, caseLabels));
 
             for (int block : members) {
-                emitter.block(out, blocks, block, blockLabels);
+                emitter.block(out, block, blockLabels);
             }
 
             out.add(defaultLabels[group]);
@@ -281,7 +365,8 @@ public final class FlowFlatten extends Transformer {
         method.invisibleLocalVariableAnnotations = null;
         if (DEBUG) {
             System.err.println("[flatten] ok " + method.name + method.desc
-                    + ": blocks=" + blocks.size() + ", dispatchers=" + groups.size());
+                    + ": blocks=" + blocks.size() + ", dispatchers=" + groups.size()
+                    + ", spilled=" + spilled);
         }
     }
 
@@ -298,17 +383,21 @@ public final class FlowFlatten extends Transformer {
         private final int[] keys;
         private final Map<Integer, Integer> groupOf;
         private final LabelNode[] loopLabels;
+        private final List<Block> blocks;
 
-        Emitter(int stateSlot, int[] keys, Map<Integer, Integer> groupOf, LabelNode[] loopLabels) {
+        Emitter(int stateSlot, int[] keys, Map<Integer, Integer> groupOf, LabelNode[] loopLabels,
+                List<Block> blocks) {
             this.stateSlot = stateSlot;
             this.keys = keys;
             this.groupOf = groupOf;
             this.loopLabels = loopLabels;
+            this.blocks = blocks;
         }
 
-        void block(InsnList out, List<Block> blocks, int index, LabelNode[] blockLabels) {
+        void block(InsnList out, int index, LabelNode[] blockLabels) {
             Block block = blocks.get(index);
             out.add(blockLabels[index]);
+            reload(out, block);
             for (AbstractInsnNode node : block.nodes) {
                 if (node != block.terminator) {
                     out.add(node);
@@ -349,6 +438,17 @@ public final class FlowFlatten extends Transformer {
             }
         }
 
+        /** Reloads a block's incoming operand stack inside its case (bottom to top). */
+        private static void reload(InsnList out, Block block) {
+            int[] slots = block.spillLocals;
+            if (slots == null) {
+                return;
+            }
+            for (int slot = 0; slot < slots.length; slot++) {
+                out.add(new VarInsnNode(block.stackTypes[slot].getOpcode(Opcodes.ILOAD), slots[slot]));
+            }
+        }
+
         private LabelNode[] switchTargets(InsnList out, Block block) {
             LabelNode[] targets = new LabelNode[block.successors.length];
             Map<Integer, LabelNode> byTarget = new LinkedHashMap<>();
@@ -370,6 +470,13 @@ public final class FlowFlatten extends Transformer {
         }
 
         private void state(InsnList out, int target) {
+            Block block = blocks.get(target);
+            int[] slots = block.spillLocals;
+            if (slots != null) {
+                for (int slot = slots.length - 1; slot >= 0; slot--) {
+                    out.add(new VarInsnNode(block.stackTypes[slot].getOpcode(Opcodes.ISTORE), slots[slot]));
+                }
+            }
             out.add(Insns.intNode(keys[target]));
             out.add(new VarInsnNode(Opcodes.ISTORE, stateSlot));
             out.add(new JumpInsnNode(Opcodes.GOTO, loopLabels[groupOf.get(target)]));
@@ -529,6 +636,8 @@ public final class FlowFlatten extends Transformer {
     /**
      * Local-slot type key for dispatcher grouping.
      * <ul>
+     *   <li>{@code NEW} value → {@code U<id>} allocation-site marker until its
+     *       {@code <init>} transition;</li>
      *   <li>typed slot → descriptor;</li>
      *   <li>null slot → no path ever initialized it (TOP, unreadable) — {@code ?};</li>
      *   <li>wide second slot → {@code W} (the preceding descriptor disambiguates);</li>
@@ -543,6 +652,10 @@ public final class FlowFlatten extends Transformer {
             BasicValue value = frame.getLocal(i);
             if (value == null) {
                 builder.append("?;");
+                continue;
+            }
+            if (value instanceof UninitializedValue uninitialized) {
+                builder.append('U').append(uninitialized.id).append(';');
                 continue;
             }
             Type type = value.getType();
@@ -561,16 +674,6 @@ public final class FlowFlatten extends Transformer {
             builder.append(type.getDescriptor()).append(';');
         }
         return builder.toString();
-    }
-
-    private static boolean allLocalsKnown(Frame<BasicValue> frame) {
-        for (int i = 0; i < frame.getLocals(); i++) {
-            BasicValue value = frame.getLocal(i);
-            if (value == null) {
-                return false;
-            }
-        }
-        return true;
     }
 
     /** Guards against code generators that under-report {@code maxLocals}. */
@@ -617,10 +720,23 @@ public final class FlowFlatten extends Transformer {
     private static final class MergeInterpreter extends BasicInterpreter {
 
         private final IHierarchy hierarchy;
+        private final Map<AbstractInsnNode, Integer> newIds;
 
-        MergeInterpreter(IHierarchy hierarchy) {
+        MergeInterpreter(IHierarchy hierarchy, Map<AbstractInsnNode, Integer> newIds) {
             super(Opcodes.ASM9);
             this.hierarchy = hierarchy;
+            this.newIds = newIds;
+        }
+
+        @Override
+        public BasicValue newOperation(AbstractInsnNode insn) throws AnalyzerException {
+            if (insn.getOpcode() == Opcodes.NEW) {
+                Integer id = newIds.get(insn);
+                if (id != null) {
+                    return new UninitializedValue(Type.getObjectType(((TypeInsnNode) insn).desc), id);
+                }
+            }
+            return super.newOperation(insn);
         }
 
         @Override
@@ -636,8 +752,21 @@ public final class FlowFlatten extends Transformer {
             if (value1.equals(value2)) {
                 return value1;
             }
+            if (value1 instanceof UninitializedValue || value2 instanceof UninitializedValue) {
+                return BasicValue.UNINITIALIZED_VALUE; // different allocation sites never merge
+            }
             Type type1 = value1.getType();
             Type type2 = value2.getType();
+            if (type1 != null && type2 != null) {
+                // The verifier's null type is assignable to every reference; merging it with
+                // a class must keep the class (a plain Object fallback would widen frames).
+                if (isNullType(type1)) {
+                    return value2;
+                }
+                if (isNullType(type2)) {
+                    return value1;
+                }
+            }
             if (hierarchy == null || type1 == null || type2 == null) {
                 return BasicValue.UNINITIALIZED_VALUE;
             }
@@ -650,12 +779,128 @@ public final class FlowFlatten extends Transformer {
             return reference(common);
         }
 
+        private static boolean isNullType(Type type) {
+            return type.getSort() == Type.OBJECT && "null".equals(type.getInternalName());
+        }
+
         private static String name(Type type) {
             return type.getSort() == Type.ARRAY ? type.getDescriptor() : type.getInternalName();
         }
 
         private static BasicValue reference(String name) {
             return new BasicValue(name.startsWith("[") ? Type.getType(name) : Type.getObjectType(name));
+        }
+    }
+
+    /** A value produced by {@code NEW} before its {@code <init>} call. Two sites never merge. */
+    private static final class UninitializedValue extends BasicValue {
+
+        final int id;
+
+        UninitializedValue(Type type, int id) {
+            super(type);
+            this.id = id;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) {
+                return true;
+            }
+            if (!(other instanceof UninitializedValue value)) {
+                return false;
+            }
+            return id == value.id && Objects.equals(getType(), value.getType());
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * Objects.hashCode(getType()) + id;
+        }
+
+        @Override
+        public String toString() {
+            return "uninitialized(" + id + ") " + getType();
+        }
+    }
+
+    /** Analyzer that produces {@link InitFrame}s (verifier-style NEW/&lt;init&gt; tracking). */
+    private static final class InitAnalyzer extends Analyzer<BasicValue> {
+
+        InitAnalyzer(MergeInterpreter interpreter) {
+            super(interpreter);
+        }
+
+        @Override
+        protected Frame<BasicValue> newFrame(int numLocals, int numStack) {
+            return new InitFrame<>(numLocals, numStack);
+        }
+
+        @Override
+        protected Frame<BasicValue> newFrame(Frame<? extends BasicValue> frame) {
+            return new InitFrame<>(frame);
+        }
+    }
+
+    /**
+     * The analysis interpreter marks each {@code NEW} with an allocation-site id, but copies of
+     * that value (on the stack or in locals) are only uninitialized until the matching
+     * {@code invokespecial <init>}. The verifier then replaces <em>every</em> copy with the
+     * initialized type; without that transition a value stored after its constructor (common:
+     * {@code new X(...); astore n}) would keep the marker and degrade joins to TOP, which is
+     * weaker than the real frame. This frame applies the same transition.
+     */
+    private static final class InitFrame<V extends BasicValue> extends Frame<V> {
+
+        InitFrame(int numLocals, int numStack) {
+            super(numLocals, numStack);
+        }
+
+        InitFrame(Frame<? extends V> frame) {
+            super(frame);
+        }
+
+        @Override
+        public void execute(AbstractInsnNode insn, Interpreter<V> interpreter) throws AnalyzerException {
+            int initId = -1;
+            Type initType = null;
+            if (insn.getOpcode() == Opcodes.INVOKESPECIAL) {
+                MethodInsnNode method = (MethodInsnNode) insn;
+                if ("<init>".equals(method.name)) {
+                    int index = getStackSize() - Type.getArgumentTypes(method.desc).length - 1;
+                    if (index >= 0) {
+                        V reference = getStack(index);
+                        if (reference instanceof UninitializedValue uninitialized) {
+                            initId = uninitialized.id;
+                            initType = uninitialized.getType();
+                        }
+                    }
+                }
+            }
+            super.execute(insn, interpreter);
+            if (initId < 0) {
+                return;
+            }
+            @SuppressWarnings("unchecked")
+            V initialized = (V) new BasicValue(initType);
+            for (int i = 0; i < getLocals(); i++) {
+                V value = getLocal(i);
+                if (value instanceof UninitializedValue uninitialized && uninitialized.id == initId) {
+                    setLocal(i, initialized);
+                }
+            }
+            Object[] stack = new Object[getStackSize()];
+            for (int i = 0; i < stack.length; i++) {
+                V value = getStack(i);
+                stack[i] = value instanceof UninitializedValue uninitialized && uninitialized.id == initId
+                        ? initialized : value;
+            }
+            clearStack();
+            for (Object value : stack) {
+                @SuppressWarnings("unchecked")
+                V typed = (V) value;
+                push(typed);
+            }
         }
     }
 
@@ -667,6 +912,9 @@ public final class FlowFlatten extends Transformer {
         AbstractInsnNode start;
         AbstractInsnNode terminator;
         Frame<BasicValue> frame;
+        Type[] stackTypes = new Type[0];
+        String stackSignature = "";
+        int[] spillLocals;
         int[] successors = new int[0];
         Map<Integer, LabelNode> switchTrampolines;
     }

@@ -20,8 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * v3.3 differential execution: the flattened fixture must compute exactly the same
  * values as the original for a table of extreme and ordinary inputs. The fixture
- * covers loops, dense and sparse switches, early exits and a skipped try/catch
- * method; a second test checks that transformation is deterministic.
+ * covers loops, dense and sparse switches, early exits, a skipped try/catch method,
+ * ternary/live-stack spills and an uninitialized {@code NEW} in a constructor argument;
+ * a second test checks that transformation is deterministic.
  */
 class FlowFlattenTest {
 
@@ -45,14 +46,18 @@ class FlowFlattenTest {
 
         assertTrue(switches(transformed) > switches(original),
                 "expected dispatchers to add switches (" + switches(original) + " -> " + switches(transformed) + ")");
-        assertEquals(switchCount(original, "state4"), switchCount(transformed, "state4"),
-                "state4 has a ternary value live across a branch and must be skipped");
+        assertTrue(switchCount(transformed, "state4") > switchCount(original, "state4"),
+                "ternary values are spilled, so state4 should now be flattened");
         assertEquals(0, switchCount(transformed, "guarded"),
                 "methods with an exception table must be skipped");
         assertTrue(switchCount(transformed, "state5") > switchCount(original, "state5"),
                 "dense-switch method should be flattened (dispatcher switch added)");
         assertTrue(switchCount(transformed, "state6") > switchCount(original, "state6"),
                 "sparse-switch method should be flattened (dispatcher switch added)");
+        for (String method : new String[] {"ternary1", "ternary2", "ternary3", "ternaryNull", "ctorTernary"}) {
+            assertTrue(switchCount(transformed, method) > switchCount(original, method),
+                    method + " should be flattened via stack spills");
+        }
 
         Class<?> fixture = Reload.define(FlowFixture.class, Reload.write(transformed));
         for (int v : INTS) {
@@ -63,11 +68,29 @@ class FlowFlattenTest {
             for (int w : INTS) {
                 assertEquals(FlowFixture.state2(v, w), invoke(fixture, "state2", v, w),
                         "state2(" + v + ", " + w + ")");
+                assertEquals(FlowFixture.ternary1(v, w), invoke(fixture, "ternary1", v, w),
+                        "ternary1(" + v + ", " + w + ")");
             }
         }
         for (long v : LONGS) {
             assertEquals(FlowFixture.state3(v),
                     fixture.getMethod("state3", long.class).invoke(null, v), "state3(" + v + ")");
+            for (int w : new int[] {Integer.MIN_VALUE, -1, 0, 1, Integer.MAX_VALUE}) {
+                assertEquals(FlowFixture.ternary2(v, w),
+                        (long) fixture.getMethod("ternary2", long.class, int.class).invoke(null, v, w),
+                        "ternary2(" + v + ", " + w + ")");
+            }
+        }
+        for (boolean flag : new boolean[] {true, false}) {
+            assertEquals(FlowFixture.ternary3(flag, "left", "right"),
+                    fixture.getMethod("ternary3", boolean.class, String.class, String.class)
+                            .invoke(null, flag, "left", "right"), "ternary3(" + flag + ")");
+            assertEquals(FlowFixture.ternaryNull(flag),
+                    fixture.getMethod("ternaryNull", boolean.class).invoke(null, flag),
+                    "ternaryNull(" + flag + ")");
+            assertEquals(FlowFixture.ctorTernary(flag),
+                    fixture.getMethod("ctorTernary", boolean.class).invoke(null, flag),
+                    "ctorTernary(" + flag + ")");
         }
         for (int v : new int[] {Integer.MIN_VALUE, -7, -1, 0, 1, 3, 42}) {
             assertEquals(FlowFixture.guarded(v), fixture.getMethod("guarded", int.class).invoke(null, v),

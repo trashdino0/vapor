@@ -25,7 +25,7 @@ options:
 
 ```
 .\gradlew.bat build          # tests + shadow jar
-# → build\libs\vapor-0.3.0.jar
+# → build\libs\vapor-0.3.2.jar
 ```
 
 Requires JDK 21 to build (the output supports Java 8–21 class files; every class is written with
@@ -34,7 +34,7 @@ Requires JDK 21 to build (the output supports Java 8–21 class files; every cla
 ## Example
 
 ```
-java -jar build\libs\vapor-0.3.0.jar -i app.jar -o app-obf.jar -config vapor.json -mapping mapping.txt
+java -jar build\libs\vapor-0.3.2.jar -i app.jar -o app-obf.jar -config vapor.json -mapping mapping.txt
 ```
 
 ## What Vapor does
@@ -46,15 +46,16 @@ java -jar build\libs\vapor-0.3.0.jar -i app.jar -o app-obf.jar -config vapor.jso
 | `StringEncryptor` | Replaces `LDC` string constants (length ≥ `strings.minLength`) with an encoded constant + per-string key + a call to a synthetic per-class decryptor. **Polymorphic**: each class gets one of 12 decryptor bodies (4 math shapes × 3 loop forms). Since v3.1 it also rewrites `invokedynamic` string-concat call sites into decryptor-backed `StringBuilder` chains, so recipe literals leave the class file too. |
 | `DeadCode` | Inserts opaque-predicate-guarded decoy blocks at stack-empty points (never before `super()` in constructors). All junk is side-effect-free even if executed. |
 | `FlowShuffle` | Control-flow noise: guard splits, condition perturbation (`(x)` → `(x ^ 0)`), jump inversion. Constructors are left alone. |
-| `FlowFlatten` | v3.3: bounded control-flow flattening — blocks are moved behind a `lookupswitch` state machine (random, unique state values; permuted block order; `IllegalStateException` default). One dispatcher per verifier-consistent entry-frame signature (merged reference types use the project hierarchy); methods with try/catch, constructors, or values live across branches are skipped. |
+| `FlowFlatten` | v3.3: bounded control-flow flattening — blocks are moved behind a `lookupswitch` state machine (random, unique state values; permuted block order; `IllegalStateException` default). One dispatcher per verifier-consistent entry-frame signature (merged reference types use the project hierarchy); methods with try/catch or constructors are skipped. Since v3.6, values live across a branch (ternaries, short-circuit expressions) are spilled into fresh locals on every edge and reloaded inside the target case; the analyzer models `NEW`/`<init>` transitions so stored objects keep their initialized types. |
 | `IntObfuscation` | Rewrites every real int/long/float/double constant push as `v ^ k` with a per-site key (floats/doubles go through their raw bits + `intBitsToFloat`/`longBitsToDouble`; NaN is skipped to keep payload bits exact). Runs last so constants injected by other transforms are covered too. |
 | `Watermark` | Optionally embeds the configured watermark as a private synthetic constant in one deterministic class. |
 | `ResourceFixups` | Rewrites `Main-Class` / `Launcher-Agent-Class` / `Agent-Class` and `META-INF/services/*` (file name and provider lines) to follow the mapping. |
 | `MappingExport` | Writes a ProGuard-style mapping (classes, then fields, then methods with readable signatures). |
 
-v3.3 adds bounded control-flow flattening on top (see `FlowFlatten` above). Still deferred:
-reference/proxy obfuscation, anti-tamper/integrity checks, native and virtualization. The
-pipeline is built so those plug in as additional transformers.
+v3 adds bounded control-flow flattening on top (see `FlowFlatten` above), including v3.6
+entry-stack spilling that makes ternaries and short-circuit expressions flattenable. Still
+deferred: reference/proxy obfuscation, anti-tamper/integrity checks, native and virtualization.
+The pipeline is built so those plug in as additional transformers.
 
 ## Config reference
 
@@ -142,7 +143,7 @@ dev.sample.Circle -> a:
 Kept classes/members appear as identity lines. Synthetic artifacts (string decryptors, the
 watermark field before renaming) show up under their generated names.
 
-## Known limitations (v1/v2, intentional)
+## Known limitations (v1/v2/v3, intentional)
 
 - **Plaintext that stays plaintext:** `ConstantValue` field initializers, annotation element
   values, record `toString` recipes, and string-concat recipes that contain literal control
@@ -161,10 +162,11 @@ watermark field before renaming) show up under their generated names.
 - **Constructors** get `DeadCode` only after the `super()` / `this()` call, and `FlowShuffle` /
   `FlowFlatten` leave them alone entirely.
 - **`FlowFlatten` coverage is deliberately bounded**: methods with try/catch (including
-  `synchronized` blocks), constructors, artificials, JSR/RET, more than 2000 instructions, more
-  than `flattenMaxBlocks` blocks, or any branch target that carries values on the operand stack
-  (ternaries and short-circuit expressions routinely do) stay unflattened. Spilling those values
-  to locals is a future enhancement; the skip rules are what keep the transform verifier-safe.
+  `synchronized` blocks), constructors, artificials, JSR/RET, more than 2000 instructions, or
+  more than `flattenMaxBlocks` blocks stay unflattened. Values live across a branch (ternaries,
+  short-circuit expressions) are *not* a skip reason since v3.6: they are spilled into fresh
+  locals on every edge and reloaded inside the target case. The remaining skip rules are what
+  keep the transform verifier-safe.
 - Flattening drops the `LocalVariableTable` of rewritten methods (block reordering invalidates its
   ranges); the default pipeline strips those tables anyway.
 - **Noise transforms are budgeted, not maximal** — they trade size for readability, capped by

@@ -127,6 +127,33 @@ public final class FlowFixture {
         return r;
     }
 
+    /** Ternary results live across the branch: spilled into locals, reloaded in the case. */
+    public static int ternary1(int v, int w) {
+        int r = (v & 1) == 0 ? v + w : v - w;
+        return r ^ (w > 0 ? 0x55 : -0x55);
+    }
+
+    public static long ternary2(long v, int w) {
+        long a = w > 0 ? v * 3 : v / 3;
+        long b = w < 0 ? v + 11 : v - 7;
+        return a ^ b;
+    }
+
+    public static String ternary3(boolean flag, String left, String right) {
+        return (flag ? left : right) + ":" + (flag ? right : left);
+    }
+
+    /** Null merged with a reference: the verifier keeps the class, not Object. */
+    public static Object ternaryNull(boolean flag) {
+        Object value = flag ? null : "value";
+        return value == null ? "null" : value;
+    }
+
+    /** A NEW value is live across the ternary in the constructor argument. */
+    public static String ctorTernary(boolean flag) {
+        return new StringBuilder(flag ? "left" : "right").append('!').toString();
+    }
+
     /** Exception table: the flattener must skip this method wholesale. */
     public static int guarded(int v) {
         try {

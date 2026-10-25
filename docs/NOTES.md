@@ -10,9 +10,9 @@
 - Gradle 9.8.1 was downloaded to `%TEMP%\opencode\gradle-9.8.1\bin\gradle.bat` (temp — may
   vanish). The project has a wrapper: prefer `.\gradlew.bat <task>`. First wrapper run downloads
   the dist into `~/.gradle/wrapper/dists/` (one-time, ~130 MB).
-- Build: `.\gradlew.bat build` → fat jar `build\libs\vapor-0.3.0.jar` (`shadowJar` alone builds
+- Build: `.\gradlew.bat build` → fat jar `build\libs\vapor-0.3.2.jar` (`shadowJar` alone builds
   just the jar).
-- Run: `java -jar build\libs\vapor-0.3.0.jar -i in.jar -o out.jar`
+- Run: `java -jar build\libs\vapor-0.3.2.jar -i in.jar -o out.jar`
 - Rig: `.\scripts\rig.ps1 -Sample hello` / `-Sample legacy8` / `-Sample hardening`; `-Build`
   builds first; `-SkipDecompile` for speed. Workspace:
   `%TEMP%\opencode\vapor-rig\<sample>-<release>\` with
@@ -284,7 +284,7 @@ Shadow `com.gradleup.shadow` 9.6.1 · Gradle 9.8.1 · Java toolchain 21.
 ### Stress-test recipe (the strongest correctness gate we have)
 
 ```
-java -jar build\libs\vapor-0.3.0.jar -i cfr.jar -o cfr-obf.jar        # full v3 defaults
+java -jar build\libs\vapor-0.3.2.jar -i cfr.jar -o cfr-obf.jar        # full v3 defaults
 java -Xverify:all tools\LoadCheck.java cfr-obf.jar                     # expect 0 failures
 java -jar cfr-obf.jar <some.jar> --outputdir dec-obf                   # run the obfuscated CFR
 java -jar tools\cfr-0.152.jar <some.jar> --outputdir dec-base          # baseline
@@ -295,6 +295,10 @@ Result (2026-10-18): 1302 classes, 1.7 s, 2.16 → 2.92 MB, LoadCheck 0 failures
 6/6 identical, **cfr-obf.jar decompiling itself 733/733 identical**. Re-run this after any
 transform change; it exercises parsing, regex, hashing, switch tables, exception handling and
 huge methods far beyond the samples.
+
+Result (2026-10-25, 0.3.2): 1302 classes, 2399/8883 methods flattened (475 stack values spilled),
+LoadCheck 1302/1302 clean, obfuscated CFR exit 0, **733/733 self-decompile files byte-identical**,
+determinism `F6ED95782E1D3D1F8E5DCDCBADB0B29AAD7D34C68FD9A6F300C6920907D59F55`; 2.16 → 4.52 MB.
 
 ## v3 notes (coverage & control flow)
 
@@ -369,10 +373,10 @@ huge methods far beyond the samples.
   25 private dispatchers to 6 grouped ones.
 - Skip rules: abstract/native, `<init>`, artificials (decryptors), any try/catch (covers
   `synchronized`), JSR/RET, analyzer failure, fewer than 3 blocks, more than
-  `hardening.flattenMaxBlocks` blocks, more than 2000 instructions, and any block entry with a
-  non-empty operand stack. The last rule matters: values live across branches (ternaries,
-  short-circuit expressions) cannot pass through an empty-stack dispatcher. Spilling them into
-  fresh locals at the edges would lift the restriction — future enhancement, not v3.
+  `hardening.flattenMaxBlocks` blocks, more than 2000 instructions, and (in v3.3–v3.5) any block
+  entry with a non-empty operand stack. The last rule mattered: values live across branches
+  (ternaries, short-circuit expressions) cannot pass through an empty-stack dispatcher. v3.6
+  removes the restriction by spilling those values (see below).
 - **Pipeline interaction** (found while exercising the demo jars in 0.3.1). Two invariants were
   missing: (1) analyzers size their frames from `MethodNode.maxStack`, but the transforms insert
   code and rely on the writer's `COMPUTE_MAXS`, so by the time `FlowFlatten` ran the stored bound
@@ -392,10 +396,10 @@ huge methods far beyond the samples.
   Skidfuscator's `DriverTransformer` provides opaque per-method/block predicates used as state
   values. Vapor adopts the frame-grouping insight and randomized keys, not the code.
 - Coverage after 0.3.1: 2094 of 8883 methods on the CFR stress jar (was 179 before the fixes
-  above; constructors, exception-heavy and ternary-heavy code dominate the remaining skips), 0
-  verification failures, self-decompilation identical. Demo playground: demo-cli 6/40 methods
-  flattened, demo-math 4/15 (`fnv1a`, `longest`, `main`, `countBelow`), both behavior-identical;
-  jars grow ~2.2–2.8x.
+  above; constructors and exception-heavy code dominate the remaining skips; the live-stack skip
+  was removed in 0.3.2 — see below), 0 verification failures, self-decompilation identical. Demo
+  playground: demo-cli 6/40 methods flattened, demo-math 4/15 (`fnv1a`, `longest`, `main`,
+  `countBelow`), both behavior-identical; jars grow ~2.2–2.8x.
 
 ### v3.5 — post-release flattening fixes (0.3.1)
 
@@ -409,6 +413,43 @@ huge methods far beyond the samples.
   behavior-identical; CFR stress 2094/8883 methods flattened, LoadCheck 0 failures, obfuscated CFR
   exit 0, 733/733 decompiled files byte-identical; hardening determinism PASS. The `--version`
   banner (hardcoded `0.2.0`) now reports `0.3.1`.
+
+### v3.6 — spilled entry stacks (0.3.2)
+
+- `FlowFlatten` no longer skips a method because a branch target expects values on the operand
+  stack. Every edge into such a block stores the incoming values into fresh locals (top of stack
+  first); the block's case reloads them bottom-to-top before its original code. Dispatchers are
+  grouped by local **and** entry-stack signature; every edge into a group writes all of that
+  group's spill locals, so the frame merge at the loop head keeps their types. Category-2 values
+  get two local slots; references, arrays, `null` and uninitialized values use `ASTORE`/`ALOAD`.
+  The initial edge is only allowed into a group with an empty entry stack (the JVM starts with an
+  empty operand stack).
+- **`NEW`/`<init>` tracking**: the analyzer assigns each `NEW` an allocation-site id and models
+  the verifier transition at `invokespecial <init>` — every copy of that value on the stack and
+  in locals becomes the initialized type. Without it, a value stored after construction
+  (`new X(...); astore n`) kept the uninitialized marker, valid joins degraded to TOP, and the
+  first stress run failed `AnonymousArray.resugarAnonymousArray` at `aload` of a TOP local
+  (`Type top ... not assignable to reference type`). A custom `InitAnalyzer`/`InitFrame` performs
+  the transition; two different `NEW` sites never merge or share a spill slot. The same pass
+  fixed `null` + reference merges (JVMS keeps the reference, not `Object`).
+- The stack signature includes the uninitialized marker, so genuinely uninitialized values live
+  across a branch (constructor-argument ternaries) are spilled with their allocation identity and
+  ASM's `COMPUTE_FRAMES` keeps the matching `uninitialized(offset)` type. `null` stack values are
+  handled as references.
+- Skip histogram on CFR (8883 methods): **2399 flattened** (was 2094), 475 spilled stack values;
+  skips: 4131 fewer-than-3-blocks, 1365 constructors, 449 abstract/native, 395 artificials,
+  141 try/catch, 3 instruction count. No analyzer, unreachable-block or unsupported-stack skips
+  remain. That is 94% of structurally eligible methods (2399/2543); try/catch is the largest
+  remaining flattenable category.
+- Diagnostics: `-Dvapor.debugFlatten=true` prints the per-method ok/skip lines; adding
+  `-Dvapor.debugFlattenMethod=<name>` dumps that method's block local/stack signatures,
+  dispatcher groups and successor edges (this is how the `<init>` frame bug above was found).
+- Verification: 25/25 unit tests (new differential fixtures: int/long/reference ternaries, a
+  `null`/`String` merge, and a `NEW` live across a ternary in a constructor argument); rigs
+  hello/legacy8/hardening green; demo-cli now 7/40 flattened (was 6/40) and demo-math 6/15
+  (`stepsFor` and `render` join `fnv1a`, `longest`, `main`, `countBelow`), both
+  behavior-identical; CFR stress LoadCheck 1302/1302 clean, obfuscated CFR exit 0, 733/733
+  self-decompile files byte-identical; determinism PASS. Version 0.3.2.
 
 ## Reference-tool findings (from the earlier REA investigation — for Phase 2+)
 

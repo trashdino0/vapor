@@ -21,6 +21,7 @@
 | V5 | Stress test + docs | ✅ Done (2026-10-18) |
 | v3.0–v3.4 | v3: coverage & control flow (0.3.0) | ✅ Done (2026-10-19) |
 | v3.5 | Post-release flattening fixes (0.3.1) | ✅ Done (2026-10-19) |
+| v3.6 | Spilled entry stacks + verifier-accurate `NEW` tracking (0.3.2) | ✅ Done (2026-10-25) |
 
 **v1 is complete** — renaming + metadata hygiene + string encryption (+ watermark), rig-verified
 on Java 21 and Java 8 samples.
@@ -30,10 +31,12 @@ obfuscation, flow noise and polymorphic decryptors. All transforms are dependenc
 (in-place insertions only), deterministic, budgeted, and verified by executable unit tests plus a
 self-hosting stress test (obfuscated CFR decompiles its own obfuscated jar byte-identically).
 
-**v3 (coverage & control flow) is complete (0.3.1)** — concat-recipe encryption, float/double
+**v3 (coverage & control flow) is complete (0.3.2)** — concat-recipe encryption, float/double
 constants and bounded control-flow flattening on top of the v2 envelope. The 0.3.1 patch fixed a
 pipeline interaction that left flattening mostly inert (stale `maxStack`, guard-split anchor
-placement, exact-only frame merging). Reference obfuscation, anti-tamper, salting and
+placement, exact-only frame merging). The 0.3.2 patch spills live entry-stack values into fresh
+locals, so ternaries and short-circuit expressions no longer disqualify a method, and models the
+verifier's `NEW`/`<init>` transition. Reference obfuscation, anti-tamper, salting and
 virtualization remain deferred (PLAN.md).
 
 ## Phase 0 — Bootstrap ✅ (2026-10-17)
@@ -428,6 +431,22 @@ Artifacts for inspection: `%TEMP%\opencode\vapor-rig\hello-21\` and `...\legacy8
   methods flattened (was 179), LoadCheck 1302/1302 clean, obfuscated CFR exit 0, 733/733
   self-decompile files byte-identical; hardening determinism PASS. `vapor --version` now reports
   0.3.1 (the banner was still hardcoded to 0.2.0).
+- v3.6 (release `0.3.2`): removed the last structural-flattening gap on ordinary javac output —
+  blocks whose entry operand stack is non-empty. Every edge into such a block stores the incoming
+  values into fresh locals and the case reloads them bottom-to-top; dispatchers are split by
+  local **and** entry-stack signature and every edge into a group writes all its spill locals, so
+  the loop-head merge stays typed. The stack signature carries `NEW` allocation-site ids; the
+  analyzer applies the verifier's `<init>` transition to stack and local copies, and merges
+  `null` + reference correctly. The first stress run exposed exactly the missing transition:
+  `AnonymousArray.resugarAnonymousArray` failed `aload` of a TOP local because a value stored
+  after its constructor kept the uninitialized marker; a custom `InitAnalyzer`/`InitFrame` fixed
+  it without weakening the frame.
+  Verification: 25/25 tests (new int/long/reference ternary, `null` merge and constructor-argument
+  `NEW` differential fixtures); rigs hello/legacy8/hardening green; demo-cli now 7/40 and
+  demo-math 6/15 (`stepsFor`/`render` added), both behavior-identical; CFR stress
+  **2399/8883** methods flattened (was 2094; 475 stack values spilled; no
+  analyzer/unreachable/unsupported-stack skips), LoadCheck 1302/1302 clean, obfuscated CFR exit
+  0, 733/733 self-decompile files byte-identical; determinism PASS (`F6ED…7D59F55`).
 
 ## Decisions log (short)
 

@@ -155,6 +155,13 @@ public final class Renamer extends Transformer {
             }
         }
 
+        // Record component obfuscation needs the backing field, accessor and
+        // RecordComponent attribute to share one name, so it can only run when
+        // both member kinds are renamed. Otherwise the whole triplet is anchored.
+        boolean obfuscateRecordComponents = config.transformers.obfuscateRecords
+                && config.transformers.renameMethods
+                && config.transformers.renameFields;
+
         // ---- automatic anchors: names the runtime/dispatch resolves by name ----
         for (JClass clazz : classes) {
             context.checkCancelled();
@@ -191,8 +198,9 @@ public final class Renamer extends Transformer {
             if (isSerializable) {
                 anchoredFieldKeys.add("serialVersionUIDJ");   // ObjectStreamClass looks the field up by name
             }
-            if (clazz.isRecord()) {
-                // v1: record component names (field + accessor + Record attribute) are preserved.
+            if (clazz.isRecord() && !obfuscateRecordComponents) {
+                // Preserve record component names unless the user explicitly opts in;
+                // the accessor and backing field share the component name.
                 for (RecordComponentNode component : node.recordComponents) {
                     anchoredFieldKeys.add(component.name + component.descriptor);
                     anchoredMethodKeys.add(component.name + "()" + component.descriptor);
@@ -244,6 +252,19 @@ public final class Renamer extends Transformer {
             assignClassNames(context, classes, keptClasses, mappings);
         }
 
+        // ---- record component names ----
+        // Plan these before method/field names: all three names must agree, and
+        // the chosen name must be reserved in both dictionaries so no other
+        // member can collide with the component accessor/backing field.
+        Set<String> presetMethodKeys = new HashSet<>();
+        Set<String> presetFieldKeys = new HashSet<>();
+        Set<String> recordComponentNames = new HashSet<>();
+        if (obfuscateRecordComponents) {
+            planRecordComponents(context, classes, keptClasses, anchoredFieldKeys,
+                    anchoredMethodKeys, mappings, presetMethodKeys, presetFieldKeys,
+                    recordComponentNames);
+        }
+
         // ---- member names ----
         // Generated names avoid every name already used anywhere in the jar or
         // in reachable library supertypes, so a rename can never create an
@@ -257,8 +278,9 @@ public final class Renamer extends Transformer {
                 }
             }
             addLibraryNames(context, classes, reserved, true);
+            reserved.addAll(recordComponentNames);
             Dictionary dict = new Dictionary(config.seed, reserved);
-            Set<String> done = new HashSet<>();
+            Set<String> done = new HashSet<>(presetMethodKeys);
             for (JClass clazz : classes) {
                 context.checkCancelled();
                 for (MethodNode method : clazz.node().methods) {
@@ -280,8 +302,9 @@ public final class Renamer extends Transformer {
                 }
             }
             addLibraryNames(context, classes, reserved, false);
+            reserved.addAll(recordComponentNames);
             Dictionary dict = new Dictionary(config.seed, reserved);
-            Set<String> done = new HashSet<>();
+            Set<String> done = new HashSet<>(presetFieldKeys);
             for (JClass clazz : classes) {
                 context.checkCancelled();
                 for (FieldNode field : clazz.node().fields) {
@@ -327,6 +350,105 @@ public final class Renamer extends Transformer {
             classes.get(i).setNode(outputs.get(i));
         }
         context.rekeyClasses();
+    }
+
+    /**
+     * A record component has three names that must agree at runtime: the backing
+     * field, the accessor ({@code componentName()}) and the RecordComponent
+     * attribute. Plan one generated name per component up front and register it
+     * in the method and field mappings, so the ordinary member planners skip the
+     * keys and cannot hand the same name to another member. The ObjectMethods
+     * bootstrap name list is rewritten too, so {@code toString} does not leak the
+     * original component names.
+     */
+    private void planRecordComponents(Context context, List<JClass> classes, Set<String> keptClasses,
+                                      Set<String> anchoredFields, Set<String> anchoredMethods,
+                                      Mappings mappings, Set<String> presetMethodKeys,
+                                      Set<String> presetFieldKeys, Set<String> reservedNames) {
+        Set<String> taken = new HashSet<>();
+        for (JClass clazz : classes) {
+            context.checkCancelled();
+            for (FieldNode field : clazz.node().fields) {
+                taken.add(field.name);
+            }
+            for (MethodNode method : clazz.node().methods) {
+                if (!method.name.startsWith("<")) {
+                    taken.add(method.name);
+                }
+            }
+        }
+        // A component name is used as both a method and a field name, so it must
+        // not shadow any reachable library member of either kind.
+        addLibraryNames(context, classes, taken, true);
+        addLibraryNames(context, classes, taken, false);
+        Dictionary dict = new Dictionary(config.seed, taken);
+
+        for (JClass clazz : classes) {
+            context.checkCancelled();
+            if (!clazz.isRecord() || keptClasses.contains(clazz.name())) {
+                continue;
+            }
+            ClassNode node = clazz.node();
+            if (node.recordComponents == null || node.recordComponents.isEmpty()) {
+                continue;
+            }
+            Map<String, String> componentNames = new HashMap<>();
+            for (RecordComponentNode component : node.recordComponents) {
+                String fieldKey = component.name + component.descriptor;
+                String methodKey = component.name + "()" + component.descriptor;
+                if (anchoredFields.contains(fieldKey) || anchoredMethods.contains(methodKey)) {
+                    // One side must keep its name (@VaporKeep / library clash), so
+                    // the triplet cannot share a new name: anchor both sides and
+                    // leave the component attribute alone.
+                    anchoredFields.add(fieldKey);
+                    anchoredMethods.add(methodKey);
+                    continue;
+                }
+                String target = mappings.mappedRecordComponent(component.name, component.descriptor);
+                if (target.equals(component.name)) {
+                    target = dict.next();
+                    mappings.mapFieldKey(component.name, component.descriptor, target);
+                    mappings.mapMethodKey(component.name, "()" + component.descriptor, target);
+                    mappings.mapRecordComponentKey(component.name, component.descriptor, target);
+                }
+                presetFieldKeys.add(fieldKey);
+                presetMethodKeys.add(methodKey);
+                reservedNames.add(target);
+                componentNames.put(component.name, target);
+            }
+            if (!componentNames.isEmpty()) {
+                rewriteObjectMethodNames(node, componentNames);
+            }
+        }
+    }
+
+    private static void rewriteObjectMethodNames(ClassNode node, Map<String, String> componentNames) {
+        for (MethodNode method : node.methods) {
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (!(insn instanceof InvokeDynamicInsnNode indy)
+                        || indy.bsm == null
+                        || !"java/lang/runtime/ObjectMethods".equals(indy.bsm.getOwner())
+                        || indy.bsmArgs == null
+                        || indy.bsmArgs.length < 2
+                        || !(indy.bsmArgs[1] instanceof String names)) {
+                    continue;
+                }
+                StringBuilder rewritten = new StringBuilder(names.length());
+                int start = 0;
+                for (int i = 0; i <= names.length(); i++) {
+                    if (i == names.length() || names.charAt(i) == ';') {
+                        String part = names.substring(start, i);
+                        String replacement = componentNames.get(part);
+                        rewritten.append(replacement == null ? part : replacement);
+                        if (i < names.length()) {
+                            rewritten.append(';');
+                        }
+                        start = i + 1;
+                    }
+                }
+                indy.bsmArgs[1] = rewritten.toString();
+            }
+        }
     }
 
     /** Plan class names: kept classes stay, the rest is flattened, inner classes follow their outer. */

@@ -11,9 +11,12 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
@@ -25,7 +28,9 @@ import org.objectweb.asm.tree.VarInsnNode;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -61,9 +66,16 @@ import java.util.Set;
  * left untouched (fail-safe). Record {@code ObjectMethods} bootstraps are never
  * touched.</p>
  *
- * <p>Deliberately not encrypted (documented): strings in {@code ConstantValue}
- * field attributes, annotation values, and record {@code toString} bootstrap
- * arguments — those are not reachable as constants in method bodies.</p>
+ * <p>v5 adds a per-class <b>string pool</b> ({@code strings.pool}, default on):
+ * literal text and per-entry keys are stored in synthetic {@code String[]} and
+ * {@code int[]} fields initialized in {@code <clinit>}, while call sites carry
+ * only an integer index. With {@code strings.encryptConstantValues}, eligible
+ * static final {@code String} fields also lose their {@code ConstantValue}
+ * attribute and are assigned from the pool in {@code <clinit>}. The watermark
+ * field is deliberately excluded so it remains discoverable.</p>
+ *
+ * <p>Still not encrypted: annotation values and record {@code toString}
+ * bootstrap arguments; those are not reachable as ordinary method constants.</p>
  */
 public final class StringEncryptor extends Transformer {
 
@@ -83,6 +95,7 @@ public final class StringEncryptor extends Transformer {
     static final int MATH_SWAP = 3;
 
     private final VaporConfig config;
+    private final List<Generated> generatedMethods = new ArrayList<>();
 
     public StringEncryptor(VaporConfig config) {
         this.config = config;
@@ -102,15 +115,21 @@ public final class StringEncryptor extends Transformer {
     public void run(Context context) {
         for (JClass clazz : context.classes()) {
             context.checkCancelled();
-            String decryptor = encrypt(clazz.node());
-            if (decryptor != null) {
-                context.addArtificialMethod(clazz.node().name, decryptor, DECRYPTOR_DESC);
+            encrypt(clazz.node());
+            for (Generated generated : generatedMethods) {
+                context.addArtificialMethod(clazz.node().name, generated.name(), generated.desc());
             }
         }
     }
 
-    /** @return the decryptor method name if any string was replaced, else {@code null}. */
+    /** @return the call-site decoder name if any string was replaced, else {@code null}. */
     String encrypt(ClassNode node) {
+        generatedMethods.clear();
+        return config.strings.pool ? encryptPool(node) : encryptLegacy(node);
+    }
+
+    /** @return the decryptor method name if any string was replaced, else {@code null}. */
+    private String encryptLegacy(ClassNode node) {
         int minLength = Math.max(0, config.strings.minLength);
         boolean isInterface = (node.access & Opcodes.ACC_INTERFACE) != 0;
         String decryptorName = freshName(node);
@@ -164,9 +183,301 @@ public final class StringEncryptor extends Transformer {
                 node.version = Opcodes.V1_8;
             }
             node.methods.add(decryptor(decryptorName, isInterface, math, loop));
+            generatedMethods.add(new Generated(decryptorName, DECRYPTOR_DESC));
             return decryptorName;
         }
         return null;
+    }
+
+    /**
+     * Preferred v4 mode: one encoded String[] + int[] key table per class. Call sites
+     * only carry an integer index; the actual encoded text and keys live in the
+     * synthetic pool fields initialized in {@code <clinit>}.
+     */
+    private String encryptPool(ClassNode node) {
+        int minLength = Math.max(0, config.strings.minLength);
+        boolean isInterface = (node.access & Opcodes.ACC_INTERFACE) != 0;
+        int math = MATH_XOR;
+        int loop = 0;
+        if (config.strings.polymorphic) {
+            int pick = Mix.of(config.seed, node.name, "<decryptor>", 0x5A17);
+            math = Math.floorMod(pick, 4);
+            loop = Math.floorMod(pick >>> 8, 3);
+        }
+
+        Set<String> methodNames = new HashSet<>();
+        for (MethodNode method : node.methods) {
+            methodNames.add(method.name);
+        }
+        Set<String> fieldNames = new HashSet<>();
+        for (FieldNode field : node.fields) {
+            fieldNames.add(field.name);
+        }
+        String decryptorName = freshName(methodNames);
+        String decoderName = freshName(methodNames);
+        String poolField = freshFieldName(fieldNames);
+        String keysField = freshFieldName(fieldNames);
+
+        List<String> encodedPool = new ArrayList<>();
+        List<Integer> keyPool = new ArrayList<>();
+        Map<String, Integer> indexes = new LinkedHashMap<>();
+        List<ConstantInit> constants = new ArrayList<>();
+
+        if (config.strings.encryptConstantValues) {
+            for (FieldNode field : node.fields) {
+                if (field.value instanceof String value
+                        && "Ljava/lang/String;".equals(field.desc)
+                        && (field.access & Opcodes.ACC_STATIC) != 0
+                        && eligible(value, minLength)
+                        && !isWatermark(value)) {
+                    int index = poolIndex(value, indexes, encodedPool, keyPool, node.name, math);
+                    field.value = null;
+                    constants.add(new ConstantInit(field.name, field.desc, index));
+                }
+            }
+        }
+
+        // Snapshot: the generated helper methods must not be scanned as user code.
+        List<MethodNode> methods = new ArrayList<>(node.methods);
+        for (MethodNode method : methods) {
+            boolean changed = false;
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; ) {
+                AbstractInsnNode next = insn.getNext();
+                if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String value
+                        && eligible(value, minLength)) {
+                    int index = poolIndex(value, indexes, encodedPool, keyPool, node.name, math);
+                    method.instructions.insert(ldc, poolCall(node.name, decoderName, index, isInterface));
+                    method.instructions.remove(ldc);
+                    changed = true;
+                } else if (insn instanceof InvokeDynamicInsnNode indy && isStringConcat(indy)) {
+                    InsnList sequence = concatSequencePool(node, method, indy, decoderName,
+                            isInterface, minLength, math, indexes, encodedPool, keyPool);
+                    if (sequence != null) {
+                        method.instructions.insertBefore(indy, sequence);
+                        method.instructions.remove(indy);
+                        changed = true;
+                    }
+                }
+                insn = next;
+            }
+            if (changed) {
+                method.maxStack += 4;
+            }
+        }
+
+        if (encodedPool.isEmpty()) {
+            return null;
+        }
+
+        int fieldAccess = Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC
+                | (isInterface ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE);
+        node.fields.add(new FieldNode(Opcodes.ASM9, fieldAccess, poolField,
+                "[Ljava/lang/String;", null, null));
+        node.fields.add(new FieldNode(Opcodes.ASM9, fieldAccess, keysField,
+                "[I", null, null));
+
+        MethodNode clinit = null;
+        for (MethodNode method : node.methods) {
+            if ("<clinit>".equals(method.name) && "()V".equals(method.desc)) {
+                clinit = method;
+                break;
+            }
+        }
+        boolean needsReturn;
+        if (clinit == null) {
+            clinit = new MethodNode(Opcodes.ASM9, Opcodes.ACC_STATIC,
+                    "<clinit>", "()V", null, null);
+            node.methods.add(clinit);
+            needsReturn = true;
+        } else {
+            needsReturn = clinit.instructions.size() == 0;
+        }
+        InsnList init = new InsnList();
+        init.add(Insns.intNode(encodedPool.size()));
+        init.add(new TypeInsnNode(Opcodes.ANEWARRAY, STRING));
+        for (int i = 0; i < encodedPool.size(); i++) {
+            init.add(new InsnNode(Opcodes.DUP));
+            Insns.pushInt(init, i);
+            init.add(new LdcInsnNode(encodedPool.get(i)));
+            init.add(new InsnNode(Opcodes.AASTORE));
+        }
+        init.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, poolField,
+                "[Ljava/lang/String;"));
+        init.add(Insns.intNode(encodedPool.size()));
+        init.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_INT));
+        for (int i = 0; i < keyPool.size(); i++) {
+            init.add(new InsnNode(Opcodes.DUP));
+            Insns.pushInt(init, i);
+            Insns.pushInt(init, keyPool.get(i));
+            init.add(new InsnNode(Opcodes.IASTORE));
+        }
+        init.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name, keysField, "[I"));
+        for (ConstantInit constant : constants) {
+            Insns.pushInt(init, constant.index());
+            init.add(new MethodInsnNode(Opcodes.INVOKESTATIC, node.name, decoderName,
+                    "(I)Ljava/lang/String;", isInterface));
+            init.add(new FieldInsnNode(Opcodes.PUTSTATIC, node.name,
+                    constant.name(), constant.desc()));
+        }
+        clinit.instructions.insert(init);
+        if (needsReturn) {
+            clinit.instructions.add(new InsnNode(Opcodes.RETURN));
+        }
+        clinit.maxStack = Math.max(clinit.maxStack, 8);
+
+        node.methods.add(decryptor(decryptorName, isInterface, math, loop));
+        node.methods.add(poolDecoder(decoderName, node.name, poolField, keysField,
+                decryptorName, isInterface));
+        generatedMethods.add(new Generated(decryptorName, DECRYPTOR_DESC));
+        generatedMethods.add(new Generated(decoderName, "(I)Ljava/lang/String;"));
+        if (isInterface && node.version < Opcodes.V1_8) {
+            node.version = Opcodes.V1_8;
+        }
+        return decoderName;
+    }
+
+    private boolean isWatermark(String value) {
+        return config.watermark != null && !config.watermark.isEmpty()
+                && config.watermark.equals(value);
+    }
+
+    private int poolIndex(String value, Map<String, Integer> indexes, List<String> encoded,
+                          List<Integer> keys, String className, int math) {
+        Integer existing = indexes.get(value);
+        if (existing != null) {
+            return existing;
+        }
+        int index = encoded.size();
+        int key = keyFor(className, (int) config.seed, index);
+        encoded.add(encode(value, key, math));
+        keys.add(key);
+        indexes.put(value, index);
+        return index;
+    }
+
+    private static InsnList poolCall(String owner, String decoderName, int index, boolean isInterface) {
+        InsnList list = new InsnList();
+        Insns.pushInt(list, index);
+        list.add(new MethodInsnNode(Opcodes.INVOKESTATIC, owner, decoderName,
+                "(I)Ljava/lang/String;", isInterface));
+        return list;
+    }
+
+    private static MethodNode poolDecoder(String name, String owner, String poolField,
+                                          String keysField, String decryptorName, boolean isInterface) {
+        int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC
+                | (isInterface ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE);
+        MethodNode method = new MethodNode(Opcodes.ASM9, access, name,
+                "(I)Ljava/lang/String;", null, null);
+        InsnList code = method.instructions;
+        code.add(new FieldInsnNode(Opcodes.GETSTATIC, owner, poolField, "[Ljava/lang/String;"));
+        code.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        code.add(new InsnNode(Opcodes.AALOAD));
+        code.add(new FieldInsnNode(Opcodes.GETSTATIC, owner, keysField, "[I"));
+        code.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        code.add(new InsnNode(Opcodes.IALOAD));
+        code.add(new MethodInsnNode(Opcodes.INVOKESTATIC, owner, decryptorName,
+                DECRYPTOR_DESC, isInterface));
+        code.add(new InsnNode(Opcodes.ARETURN));
+        method.maxStack = 2;
+        method.maxLocals = 1;
+        return method;
+    }
+
+    private InsnList concatSequencePool(ClassNode node, MethodNode method, InvokeDynamicInsnNode indy,
+                                        String decoderName, boolean isInterface, int minLength,
+                                        int math, Map<String, Integer> indexes,
+                                        List<String> encodedPool, List<Integer> keyPool) {
+        if (indy.bsmArgs == null || indy.bsmArgs.length != 1 || !(indy.bsmArgs[0] instanceof String recipe)) {
+            return null;
+        }
+        Type[] args = Type.getArgumentTypes(indy.desc);
+        List<Object> parts = new ArrayList<>();
+        StringBuilder literal = new StringBuilder();
+        int consumed = 0;
+        for (int i = 0; i < recipe.length(); i++) {
+            char c = recipe.charAt(i);
+            if (c == '\u0001') {
+                if (literal.length() > 0) {
+                    parts.add(literal.toString());
+                    literal.setLength(0);
+                }
+                if (consumed >= args.length) {
+                    return null;
+                }
+                parts.add(consumed++);
+            } else if (c == '\u0002') {
+                return null;
+            } else {
+                literal.append(c);
+            }
+        }
+        if (literal.length() > 0) {
+            parts.add(literal.toString());
+        }
+        if (consumed != args.length) {
+            return null;
+        }
+
+        int[] slots = new int[args.length];
+        int slot = method.maxLocals;
+        for (int i = 0; i < args.length; i++) {
+            slots[i] = slot;
+            slot += args[i].getSize();
+        }
+        method.maxLocals = slot;
+
+        InsnList code = new InsnList();
+        for (int i = args.length - 1; i >= 0; i--) {
+            code.add(new VarInsnNode(storeOpcode(args[i]), slots[i]));
+        }
+        code.add(new TypeInsnNode(Opcodes.NEW, STRING_BUILDER));
+        code.add(new InsnNode(Opcodes.DUP));
+        code.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, STRING_BUILDER, "<init>", "()V", false));
+        for (Object part : parts) {
+            if (part instanceof Integer argument) {
+                code.add(new VarInsnNode(loadOpcode(args[argument]), slots[argument]));
+                code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, STRING_BUILDER, "append",
+                        appendDescriptor(args[argument]), false));
+            } else {
+                String value = (String) part;
+                if (eligible(value, minLength)) {
+                    int index = poolIndex(value, indexes, encodedPool, keyPool, node.name, math);
+                    code.add(poolCall(node.name, decoderName, index, isInterface));
+                } else {
+                    code.add(new LdcInsnNode(value));
+                }
+                code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, STRING_BUILDER, "append",
+                        "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false));
+            }
+        }
+        code.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, STRING_BUILDER, "toString",
+                "()Ljava/lang/String;", false));
+        return code;
+    }
+
+    private static String freshName(Set<String> taken) {
+        for (int i = 0; ; i++) {
+            String candidate = Dictionary.nameFor(i);
+            if (taken.add(candidate)) {
+                return candidate;
+            }
+        }
+    }
+
+    private static String freshFieldName(Set<String> taken) {
+        for (int i = 0; ; i++) {
+            String candidate = Dictionary.nameFor(i);
+            if (taken.add(candidate)) {
+                return candidate;
+            }
+        }
+    }
+
+    private record ConstantInit(String name, String desc, int index) {
+    }
+
+    private record Generated(String name, String desc) {
     }
 
     /** Encodes with the same math shape the decryptor will invert. */

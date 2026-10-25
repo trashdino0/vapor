@@ -21,6 +21,7 @@ public final class Mappings {
     private final Map<String, String> classes = new LinkedHashMap<>();
     private final Map<String, String> methods = new HashMap<>();
     private final Map<String, String> fields = new HashMap<>();
+    private final Map<String, String> recordComponents = new HashMap<>();
 
     /** Export data for the mapping file, in jar order. */
     private final List<ClassMapping> export = new ArrayList<>();
@@ -43,6 +44,10 @@ public final class Mappings {
         fields.put(name + descriptor, renamed);
     }
 
+    public void mapRecordComponentKey(String name, String descriptor, String renamed) {
+        recordComponents.put(name + descriptor, renamed);
+    }
+
     /** Identity when the class is not renamed. */
     public String mappedClass(String internalName) {
         if (internalName == null) {
@@ -61,6 +66,12 @@ public final class Mappings {
     /** Identity when the field key is not renamed. */
     public String mappedField(String name, String descriptor) {
         String mapped = fields.get(name + descriptor);
+        return mapped == null ? name : mapped;
+    }
+
+    /** Identity when the record component key is not renamed. */
+    public String mappedRecordComponent(String name, String descriptor) {
+        String mapped = recordComponents.get(name + descriptor);
         return mapped == null ? name : mapped;
     }
 

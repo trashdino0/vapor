@@ -22,7 +22,9 @@ import org.objectweb.asm.tree.RecordComponentNode;
  *
  * <p>{@code InnerClasses}, nest attributes and runtime annotations are kept —
  * they carry semantics (nest-based access control, reflection behavior) and
- * their names are already consistently remapped.</p>
+ * their names are already consistently remapped.
+ * {@code transformers.stripAnnotations} opts into dropping annotation attributes
+ * when the target application does not reflect on them.</p>
  */
 public final class MetadataHygiene extends Transformer {
 
@@ -41,7 +43,7 @@ public final class MetadataHygiene extends Transformer {
     public boolean enabled() {
         VaporConfig.Transformers flags = config.transformers;
         return flags.stripLineNumbers || flags.stripLocalVariables || flags.stripMethodParameters
-                || flags.stripSignatures || flags.stripSourceFile;
+                || flags.stripSignatures || flags.stripSourceFile || flags.stripAnnotations;
     }
 
     @Override
@@ -61,6 +63,12 @@ public final class MetadataHygiene extends Transformer {
             node.sourceFile = "a";
             node.sourceDebug = null;
         }
+        if (flags.stripAnnotations) {
+            node.visibleAnnotations = null;
+            node.invisibleAnnotations = null;
+            node.visibleTypeAnnotations = null;
+            node.invisibleTypeAnnotations = null;
+        }
         for (MethodNode method : node.methods) {
             if (flags.stripLineNumbers) {
                 stripLineNumbers(method);
@@ -74,16 +82,38 @@ public final class MetadataHygiene extends Transformer {
             if (flags.stripSignatures) {
                 method.signature = null;
             }
+            if (flags.stripAnnotations) {
+                method.visibleAnnotations = null;
+                method.invisibleAnnotations = null;
+                method.visibleTypeAnnotations = null;
+                method.invisibleTypeAnnotations = null;
+                method.visibleParameterAnnotations = null;
+                method.invisibleParameterAnnotations = null;
+                method.visibleLocalVariableAnnotations = null;
+                method.invisibleLocalVariableAnnotations = null;
+            }
         }
         for (var field : node.fields) {
             if (flags.stripSignatures) {
                 field.signature = null;
+            }
+            if (flags.stripAnnotations) {
+                field.visibleAnnotations = null;
+                field.invisibleAnnotations = null;
+                field.visibleTypeAnnotations = null;
+                field.invisibleTypeAnnotations = null;
             }
         }
         if (node.recordComponents != null) {
             for (RecordComponentNode component : node.recordComponents) {
                 if (flags.stripSignatures) {
                     component.signature = null;
+                }
+                if (flags.stripAnnotations) {
+                    component.visibleAnnotations = null;
+                    component.invisibleAnnotations = null;
+                    component.visibleTypeAnnotations = null;
+                    component.invisibleTypeAnnotations = null;
                 }
             }
         }

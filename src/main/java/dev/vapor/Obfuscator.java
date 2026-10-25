@@ -8,6 +8,7 @@ import dev.vapor.pipeline.postprocess.JarWrite;
 import dev.vapor.pipeline.postprocess.MappingExport;
 import dev.vapor.pipeline.postprocess.ResourceFixups;
 import dev.vapor.pipeline.preprocess.JarLoad;
+import dev.vapor.transform.impl.BlockSplit;
 import dev.vapor.transform.impl.DeadCode;
 import dev.vapor.transform.impl.FlowFlatten;
 import dev.vapor.transform.impl.FlowShuffle;
@@ -15,6 +16,7 @@ import dev.vapor.transform.impl.IntObfuscation;
 import dev.vapor.transform.impl.MetadataHygiene;
 import dev.vapor.transform.impl.Renamer;
 import dev.vapor.transform.impl.StringEncryptor;
+import dev.vapor.transform.impl.Virtualize;
 import dev.vapor.transform.impl.Watermark;
 
 import java.nio.file.Files;
@@ -95,6 +97,7 @@ public final class Obfuscator {
         }
 
         long start = System.nanoTime();
+        Virtualize virtualize = new Virtualize(config);
         try (Context context = new Context(input, output, libraries, cancelled)) {
             new Pipeline()
                     .preprocess(new JarLoad(input))
@@ -102,13 +105,16 @@ public final class Obfuscator {
                     .transformer(new Renamer(config))
                     .transformer(new MetadataHygiene(config))
                     .transformer(new StringEncryptor(config))
+                    .transformer(virtualize)
                     .transformer(new DeadCode(config))
                     .transformer(new FlowShuffle(config))
+                    .transformer(new BlockSplit(config))
                     .transformer(new FlowFlatten(config))
+                    .transformer(new Virtualize.Commit(virtualize))
                     .transformer(new IntObfuscation(config))
                     .postprocess(new ResourceFixups())
                     .postprocess(new MappingExport(mapping))
-                    .postprocess(new JarWrite(output))
+                    .postprocess(new JarWrite(output, config))
                     .run(context, listener);
 
             int classCount = context.classes().size();

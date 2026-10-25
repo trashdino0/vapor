@@ -136,10 +136,18 @@ public final class VaporGui extends JFrame {
     private final JCheckBox intObfuscationBox = new JCheckBox("Numeric constant obfuscation", true);
     private final JCheckBox flowShuffleBox = new JCheckBox("Control-flow noise", true);
     private final JCheckBox flowFlattenBox = new JCheckBox("Control-flow flattening", true);
+    private final JCheckBox virtualizeBox = new JCheckBox("Int-only method virtualization", false);
+    private final JCheckBox obfuscateRecordsBox = new JCheckBox("Obfuscate record components", false);
+    private final JCheckBox stripAnnotationsBox = new JCheckBox("Strip annotations", false);
     private final JCheckBox failsafeBox = new JCheckBox("Failsafe: skip a failing transform", true);
     private final JCheckBox polymorphicBox = new JCheckBox("Polymorphic decryptors", true);
+    private final JCheckBox stringPoolBox = new JCheckBox("Per-class string pool", true);
+    private final JCheckBox constantValuesBox = new JCheckBox("Encrypt ConstantValue strings", true);
+    private final JCheckBox splitSingleBlockBox = new JCheckBox("Split single-block methods", true);
+    private final JCheckBox encryptClassesBox = new JCheckBox("Encrypt classes (executable jars)", false);
+    private final JCheckBox verifyIntegrityBox = new JCheckBox("Verify class integrity", true);
 
-    private final JSpinner minLengthSpinner = intSpinner(2, 0, 100_000, 1);
+    private final JSpinner minLengthSpinner = intSpinner(0, 0, 100_000, 1);
     private final JSpinner maxOverheadSpinner = doubleSpinner(2.0, 0.0, 1_000.0, 0.1);
     private final JSpinner deadBranchesSpinner = intSpinner(3, 0, 10_000, 1);
     private final JSpinner flowSplitsSpinner = intSpinner(6, 0, 100_000, 1);
@@ -441,19 +449,20 @@ public final class VaporGui extends JFrame {
         c.gridy = 0;
         c.insets = new Insets(0, 0, 10, 8);
         root.add(section("Renaming",
-                checkColumn(renameClassesBox, renameMethodsBox, renameFieldsBox)), c);
+                checkColumn(renameClassesBox, renameMethodsBox, renameFieldsBox,
+                        obfuscateRecordsBox)), c);
         c.gridx = 1;
         c.insets = new Insets(0, 8, 10, 0);
         root.add(section("Code transforms",
                 checkColumn(encryptStringsBox, deadCodeBox, intObfuscationBox,
-                        flowShuffleBox, flowFlattenBox)), c);
+                        flowShuffleBox, flowFlattenBox, virtualizeBox)), c);
 
         c.gridx = 0;
         c.gridy = 1;
         c.insets = new Insets(0, 0, 10, 8);
         root.add(section("Metadata hygiene",
                 checkColumn(stripLineNumbersBox, stripLocalVariablesBox, stripMethodParametersBox,
-                        stripSignaturesBox, stripSourceFileBox)), c);
+                        stripSignaturesBox, stripSourceFileBox, stripAnnotationsBox)), c);
         c.gridx = 1;
         c.insets = new Insets(0, 8, 10, 0);
         root.add(section("String encryption", buildStringsContent()), c);
@@ -466,6 +475,12 @@ public final class VaporGui extends JFrame {
         root.add(section("Hardening & determinism", buildHardeningContent()), c);
 
         c.gridy = 3;
+        c.weighty = 0;
+        c.fill = GridBagConstraints.BOTH;
+        c.insets = new Insets(0, 0, 8, 0);
+        root.add(section("Protection", buildProtectionContent()), c);
+
+        c.gridy = 4;
         c.weighty = 1;
         c.fill = GridBagConstraints.BOTH;
         c.insets = new Insets(0, 0, 0, 0);
@@ -493,6 +508,20 @@ public final class VaporGui extends JFrame {
                 polymorphicBox.getPreferredSize().height));
         panel.add(Box.createVerticalStrut(4));
         panel.add(polymorphicBox);
+
+        stringPoolBox.setOpaque(false);
+        stringPoolBox.setAlignmentX(Component.LEFT_ALIGNMENT);
+        stringPoolBox.setMaximumSize(new Dimension(Integer.MAX_VALUE,
+                stringPoolBox.getPreferredSize().height));
+        panel.add(Box.createVerticalStrut(2));
+        panel.add(stringPoolBox);
+
+        constantValuesBox.setOpaque(false);
+        constantValuesBox.setAlignmentX(Component.LEFT_ALIGNMENT);
+        constantValuesBox.setMaximumSize(new Dimension(Integer.MAX_VALUE,
+                constantValuesBox.getPreferredSize().height));
+        panel.add(Box.createVerticalStrut(2));
+        panel.add(constantValuesBox);
 
         JLabel hint = muted("Shorter strings stay in plaintext to avoid tiny call-site overhead.");
         hint.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -550,16 +579,48 @@ public final class VaporGui extends JFrame {
         panel.add(textRows);
         panel.add(Box.createVerticalStrut(6));
 
+        splitSingleBlockBox.setOpaque(false);
+        splitSingleBlockBox.setAlignmentX(Component.LEFT_ALIGNMENT);
+        splitSingleBlockBox.setMaximumSize(new Dimension(Integer.MAX_VALUE,
+                splitSingleBlockBox.getPreferredSize().height));
+        panel.add(splitSingleBlockBox);
+
         failsafeBox.setOpaque(false);
         failsafeBox.setAlignmentX(Component.LEFT_ALIGNMENT);
         failsafeBox.setMaximumSize(new Dimension(Integer.MAX_VALUE,
                 failsafeBox.getPreferredSize().height));
+        panel.add(Box.createVerticalStrut(2));
         panel.add(failsafeBox);
 
         JLabel hint = muted("Same input + same config + same seed = byte-identical output.");
         hint.setAlignmentX(Component.LEFT_ALIGNMENT);
         hint.setMaximumSize(new Dimension(Integer.MAX_VALUE, hint.getPreferredSize().height));
         panel.add(Box.createVerticalStrut(4));
+        panel.add(hint);
+        return panel;
+    }
+
+    private JComponent buildProtectionContent() {
+        JPanel panel = new JPanel();
+        panel.setOpaque(false);
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+
+        encryptClassesBox.setOpaque(false);
+        verifyIntegrityBox.setOpaque(false);
+
+        JPanel boxes = new JPanel(new GridLayout(1, 2, 18, 4));
+        boxes.setOpaque(false);
+        boxes.add(encryptClassesBox);
+        boxes.add(verifyIntegrityBox);
+        boxes.setAlignmentX(Component.LEFT_ALIGNMENT);
+        boxes.setMaximumSize(new Dimension(760, boxes.getPreferredSize().height));
+        panel.add(boxes);
+
+        JLabel hint = muted("Class encryption needs an executable jar (Main-Class); "
+                + "integrity checks are stored in the encrypted class header.");
+        hint.setAlignmentX(Component.LEFT_ALIGNMENT);
+        hint.setMaximumSize(new Dimension(Integer.MAX_VALUE, hint.getPreferredSize().height));
+        panel.add(Box.createVerticalStrut(5));
         panel.add(hint);
         return panel;
     }
@@ -616,8 +677,23 @@ public final class VaporGui extends JFrame {
         intObfuscationBox.setToolTipText("Rewrite int/long/float/double constants as keyed expressions.");
         flowShuffleBox.setToolTipText("Split and perturb control flow within the hardening budget.");
         flowFlattenBox.setToolTipText("Reorder basic blocks behind a lookupswitch dispatcher.");
+        virtualizeBox.setToolTipText("Translate eligible static int/void methods into a small custom VM. "
+                + "Methods with objects, exceptions, calls or switches are left untouched.");
+        obfuscateRecordsBox.setToolTipText("Rename record components and rewrite their ObjectMethods metadata "
+                + "(requires field and method renaming; can break reflection by component name).");
+        stripAnnotationsBox.setToolTipText("Drop runtime-visible/invisible annotations "
+                + "(breaks frameworks that reflect on them).");
         failsafeBox.setToolTipText("Skip a transformer that fails instead of aborting the whole run.");
         polymorphicBox.setToolTipText("Vary decryptor math and loop shape per class.");
+        stringPoolBox.setToolTipText("Store encoded strings in a per-class pool and decode by integer index.");
+        constantValuesBox.setToolTipText("Move static final String ConstantValue fields into an encrypted "
+                + "<clinit> assignment (pool mode only).");
+        splitSingleBlockBox.setToolTipText("Add an opaque entry branch to straight-line methods so "
+                + "control-flow flattening can process them.");
+        encryptClassesBox.setToolTipText("Encrypt class entries behind a bootstrap loader. "
+                + "Requires a jar with a Main-Class manifest entry.");
+        verifyIntegrityBox.setToolTipText("Store a CRC32 of each plaintext class and verify it in the bootstrap "
+                + "loader (class encryption only).");
         minLengthSpinner.setToolTipText("Strings shorter than this are left in plaintext.");
         maxOverheadSpinner.setToolTipText("Growth cap: added instructions ≤ (value − 1) × original size.");
         deadBranchesSpinner.setToolTipText("Maximum decoy branches injected per method.");
@@ -997,7 +1073,7 @@ public final class VaporGui extends JFrame {
 
     private void resetDefaults() {
         int choice = JOptionPane.showConfirmDialog(this,
-                "Reset all transform, string and hardening options to defaults?\n"
+                "Reset all transform, string, hardening and protection options to defaults?\n"
                         + "Paths and libraries are kept.",
                 "Reset options", JOptionPane.YES_NO_OPTION, JOptionPane.QUESTION_MESSAGE);
         if (choice != JOptionPane.YES_OPTION) {
@@ -1015,6 +1091,8 @@ public final class VaporGui extends JFrame {
                 ? new VaporConfig.Strings() : config.strings;
         VaporConfig.Hardening hardening = config.hardening == null
                 ? new VaporConfig.Hardening() : config.hardening;
+        VaporConfig.Protection protection = config.protection == null
+                ? new VaporConfig.Protection() : config.protection;
 
         renameClassesBox.setSelected(transformers.renameClasses);
         renameMethodsBox.setSelected(transformers.renameMethods);
@@ -1029,8 +1107,16 @@ public final class VaporGui extends JFrame {
         intObfuscationBox.setSelected(transformers.integerObfuscation);
         flowShuffleBox.setSelected(transformers.flowShuffle);
         flowFlattenBox.setSelected(transformers.flowFlatten);
+        virtualizeBox.setSelected(transformers.virtualize);
+        obfuscateRecordsBox.setSelected(transformers.obfuscateRecords);
+        stripAnnotationsBox.setSelected(transformers.stripAnnotations);
         failsafeBox.setSelected(config.failsafe);
         polymorphicBox.setSelected(strings.polymorphic);
+        stringPoolBox.setSelected(strings.pool);
+        constantValuesBox.setSelected(strings.encryptConstantValues);
+        splitSingleBlockBox.setSelected(hardening.splitSingleBlock);
+        encryptClassesBox.setSelected(protection.encryptClasses);
+        verifyIntegrityBox.setSelected(protection.verifyIntegrity);
         setIntSpinner(minLengthSpinner, strings.minLength);
         setDoubleSpinner(maxOverheadSpinner, hardening.maxOverhead);
         setIntSpinner(deadBranchesSpinner, hardening.deadBranchesPerMethod);
@@ -1067,13 +1153,21 @@ public final class VaporGui extends JFrame {
         config.transformers.integerObfuscation = intObfuscationBox.isSelected();
         config.transformers.flowShuffle = flowShuffleBox.isSelected();
         config.transformers.flowFlatten = flowFlattenBox.isSelected();
+        config.transformers.virtualize = virtualizeBox.isSelected();
+        config.transformers.obfuscateRecords = obfuscateRecordsBox.isSelected();
+        config.transformers.stripAnnotations = stripAnnotationsBox.isSelected();
 
         config.strings.minLength = ((Number) minLengthSpinner.getValue()).intValue();
         config.strings.polymorphic = polymorphicBox.isSelected();
+        config.strings.pool = stringPoolBox.isSelected();
+        config.strings.encryptConstantValues = constantValuesBox.isSelected();
         config.hardening.maxOverhead = ((Number) maxOverheadSpinner.getValue()).doubleValue();
         config.hardening.deadBranchesPerMethod = ((Number) deadBranchesSpinner.getValue()).intValue();
         config.hardening.flowSplitsPerMethod = ((Number) flowSplitsSpinner.getValue()).intValue();
         config.hardening.flattenMaxBlocks = ((Number) flattenBlocksSpinner.getValue()).intValue();
+        config.hardening.splitSingleBlock = splitSingleBlockBox.isSelected();
+        config.protection.encryptClasses = encryptClassesBox.isSelected();
+        config.protection.verifyIntegrity = verifyIntegrityBox.isSelected();
         return config;
     }
 

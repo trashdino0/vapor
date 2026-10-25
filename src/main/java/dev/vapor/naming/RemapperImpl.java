@@ -10,8 +10,8 @@ import org.objectweb.asm.commons.Remapper;
  *   <li>invokedynamic call-site names in general (string concat, record
  *       {@code toString}, switch bootstraps) — lambda call sites are handled
  *       separately by {@link VaporClassRemapper};</li>
- *   <li>record component names (v1 keeps them, along with the accessors and
- *       backing fields);</li>
+ *   <li>record component names unless {@code obfuscateRecords} is enabled; the
+ *       renamer keeps the backing field, accessor and Record attribute in sync;</li>
  *   <li>{@code <init>} / {@code <clinit>}.</li>
  * </ul>
  */
@@ -58,6 +58,6 @@ public final class RemapperImpl extends Remapper {
 
     @Override
     public String mapRecordComponentName(String owner, String name, String descriptor) {
-        return name;
+        return mappings.mappedRecordComponent(name, descriptor);
     }
 }

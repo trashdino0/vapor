@@ -4,8 +4,12 @@ A general-purpose Java obfuscator with both a CLI and a desktop GUI. v1 shipped 
 **renaming** (classes / methods / fields), **string encryption** and **metadata hygiene**. v2 adds
 **hardening**: opaque predicates, dead-branch injection, integer/long constant obfuscation,
 control-flow noise and polymorphic string decryptors. v3 adds concat-recipe encryption,
-float/double constants and bounded control-flow flattening with entry-stack spilling. Everything
-is deterministic, budgeted and failsafe-by-default, with a ProGuard-style mapping export.
+float/double constants and bounded control-flow flattening with entry-stack spilling. v5 adds
+**hardening 2.0**: a per-class encoded string pool, `ConstantValue` string encryption, record
+component and annotation options, opaque entry splits for straight-line methods, and broader
+flattening. It also adds an opt-in **encrypted-class loader** (with CRC32 integrity headers) for
+executable jars. Everything is deterministic, budgeted and failsafe-by-default, with a
+ProGuard-style mapping export.
 
 ```
 usage:
@@ -29,7 +33,7 @@ options:
 
 ```
 .\gradlew.bat build          # tests + shadow jar
-# → build\libs\vapor-0.4.0.jar
+# → build\libs\vapor-0.5.0.jar
 ```
 
 Requires JDK 21 to build (the output supports Java 8–21 class files; every class is written with
@@ -38,13 +42,13 @@ Requires JDK 21 to build (the output supports Java 8–21 class files; every cla
 ## Example
 
 ```
-java -jar build\libs\vapor-0.4.0.jar -i app.jar -o app-obf.jar -config vapor.json -mapping mapping.txt
+java -jar build\libs\vapor-0.5.0.jar -i app.jar -o app-obf.jar -config vapor.json -mapping mapping.txt
 ```
 
 ## Desktop GUI
 
 ```
-java -jar build\libs\vapor-0.4.0.jar --gui
+java -jar build\libs\vapor-0.5.0.jar --gui
 # or, from the source tree:
 .\gradlew.bat gui
 ```
@@ -64,20 +68,26 @@ partial temporary output is deleted.
 | Transformer | Effect |
 |---|---|
 | `Renamer` | Renames classes (flattened to the root package), methods and fields through a global `name+descriptor` key — overrides, bridges and interface dispatch stay consistent. Innermost-aware; lambdas' call sites follow the SAM rename. |
-| `MetadataHygiene` | Strips line numbers, local variable tables, `MethodParameters`, generic signatures; rewrites `SourceFile` to `a`; clears `SourceDebugExtension`. |
-| `StringEncryptor` | Replaces `LDC` string constants (length ≥ `strings.minLength`) with an encoded constant + per-string key + a call to a synthetic per-class decryptor. **Polymorphic**: each class gets one of 12 decryptor bodies (4 math shapes × 3 loop forms). Since v3.1 it also rewrites `invokedynamic` string-concat call sites into decryptor-backed `StringBuilder` chains, so recipe literals leave the class file too. |
+| `MetadataHygiene` | Strips line numbers, local variable tables, `MethodParameters`, generic signatures; rewrites `SourceFile` to `a`; clears `SourceDebugExtension`. `stripAnnotations` optionally drops runtime annotations. |
+| `StringEncryptor` | Encodes every non-empty string (length ≥ `strings.minLength`, default `0`) into a synthetic per-class `String[]` pool plus an `int[]` key table initialized in `<clinit>`; call sites carry only an integer index. `encryptConstantValues` also moves static final `String` fields into encrypted `<clinit>` assignments. **Polymorphic**: each class gets one of 12 decryptor bodies (4 math shapes × 3 loop forms). It also rewrites `invokedynamic` string-concat literals through the same pool. |
 | `DeadCode` | Inserts opaque-predicate-guarded decoy blocks at stack-empty points (never before `super()` in constructors). All junk is side-effect-free even if executed. |
 | `FlowShuffle` | Control-flow noise: guard splits, condition perturbation (`(x)` → `(x ^ 0)`), jump inversion. Constructors are left alone. |
-| `FlowFlatten` | v3.3: bounded control-flow flattening — blocks are moved behind a `lookupswitch` state machine (random, unique state values; permuted block order; `IllegalStateException` default). One dispatcher per verifier-consistent entry-frame signature (merged reference types use the project hierarchy); methods with try/catch or constructors are skipped. Since v3.6, values live across a branch (ternaries, short-circuit expressions) are spilled into fresh locals on every edge and reloaded inside the target case; the analyzer models `NEW`/`<init>` transitions so stored objects keep their initialized types. |
+| `BlockSplit` | Adds an opaque entry branch to branch-free methods (minimum `hardening.blockSplitMinInstructions`, default 6) so the flattener has a basic-block boundary to work with. |
+| `FlowFlatten` | Bounded control-flow flattening — blocks are moved behind a `lookupswitch` state machine (random, unique state values; permuted block order; `IllegalStateException` default). One dispatcher per verifier-consistent entry-frame signature (merged reference types use the project hierarchy); values live across a branch are spilled and reloaded; the analyzer models `NEW`/`<init>` transitions. Try/catch and provably safe post-`super()` constructor prefixes are supported by the v5 flattener; `<clinit>` and artificial decryptors are deliberately skipped. |
+| `Virtualize` | Opt-in (`transformers.virtualize`): translates eligible static `int`/`void` methods into a compact `int[]` stack program and a generated per-method interpreter class. It runs before the flow transforms; helper classes are committed after flattening and then receive numeric obfuscation. Unsupported methods are untouched. |
 | `IntObfuscation` | Rewrites every real int/long/float/double constant push as `v ^ k` with a per-site key (floats/doubles go through their raw bits + `intBitsToFloat`/`longBitsToDouble`; NaN is skipped to keep payload bits exact). Runs last so constants injected by other transforms are covered too. |
-| `Watermark` | Optionally embeds the configured watermark as a private synthetic constant in one deterministic class. |
+| `ClassProtector` | Opt-in (`protection.encryptClasses`): encrypts class bodies at the final jar-write boundary, prepends a `VP01`/`VP00` header, embeds a Java 8-compatible bootstrap loader, and points `Main-Class` at it. `protection.verifyIntegrity` adds a CRC32 of each plaintext class, verified by the loader before `defineClass`. |
+| `Watermark` | Optionally embeds the configured watermark as a private synthetic constant in one deterministic class. This field is deliberately excluded from constant-value encryption so provenance remains discoverable. |
 | `ResourceFixups` | Rewrites `Main-Class` / `Launcher-Agent-Class` / `Agent-Class` and `META-INF/services/*` (file name and provider lines) to follow the mapping. |
 | `MappingExport` | Writes a ProGuard-style mapping (classes, then fields, then methods with readable signatures). |
 
-v3 adds bounded control-flow flattening on top (see `FlowFlatten` above), including v3.6
-entry-stack spilling that makes ternaries and short-circuit expressions flattenable. Still
-deferred: reference/proxy obfuscation, anti-tamper/integrity checks, native and virtualization.
-The pipeline is built so those plug in as additional transformers.
+v5 raises the static bar with the string pool, `ConstantValue` handling, record/annotation
+options and broader flattening. The class protector adds a runtime barrier for executable jars,
+and the loader verifies per-class CRC32 integrity when requested. An opt-in int-only
+virtualizer prototype is available for selected methods (see `transformers.virtualize`); it
+leaves unsupported methods untouched. Still deferred: full arbitrary-bytecode virtualization,
+native/agent protections and anti-debugging. These are brittle and are not a substitute for
+server-side secrets.
 
 ## Config reference
 
@@ -102,17 +112,30 @@ Default: no config file → everything below at its default (all transforms on, 
     "deadCode": true,
     "integerObfuscation": true,
     "flowShuffle": true,
-    "flowFlatten": true
+    "flowFlatten": true,
+    "obfuscateRecords": false,
+    "stripAnnotations": false,
+    "virtualize": false
   },
   "strings": {
-    "minLength": 2,
-    "polymorphic": true
+    "minLength": 0,
+    "polymorphic": true,
+    "pool": true,
+    "encryptConstantValues": true
   },
   "hardening": {
     "maxOverhead": 2.0,
     "deadBranchesPerMethod": 3,
     "flowSplitsPerMethod": 6,
-    "flattenMaxBlocks": 128
+    "flattenMaxBlocks": 128,
+    "flattenMinBlocks": 2,
+    "splitSingleBlock": true,
+    "blockSplitMinInstructions": 6,
+    "virtualizeMaxInstructions": 400
+  },
+  "protection": {
+    "encryptClasses": false,
+    "verifyIntegrity": true
   }
 }
 ```
@@ -124,12 +147,41 @@ Default: no config file → everything below at its default (all transforms on, 
 | `keep` | Class-name globs in dotted form, `*` and `?` supported (`com.example.*`). Kept classes keep their names **and** all their declared members; CLI `-keep` adds to this list. |
 | `watermark` | Optional string. Embedded as a `ConstantValue` in a deterministic class; findable with `javap -v` / `strings` (it is deliberately **not** encrypted). |
 | `transformers.*` | Per-transform switches — see the table above (`integerObfuscation` covers all numeric constants: int, long, float, double). |
-| `strings.minLength` | Strings shorter than this stay in plaintext (tiny strings are not worth a call site). |
+| `strings.minLength` | Strings shorter than this stay in plaintext. Default `0` encrypts every non-empty string. |
 | `strings.polymorphic` | `true` (default): per-class decryptor body picked among 12 shapes. `false`: the classic XOR/forward decryptor (smallest output). |
+| `strings.pool` | `true` (default): store encoded strings and keys in per-class tables; call sites carry an index. `false`: classic per-call encoded literal + key. |
+| `strings.encryptConstantValues` | `true` (default, pool mode): move static final `String` constants into encrypted `<clinit>` assignments. |
+| `transformers.obfuscateRecords` | Rename record backing fields, accessors and `RecordComponent` attributes together; can break reflection by component name. |
+| `transformers.stripAnnotations` | Drop runtime-visible/invisible annotations; breaks frameworks that reflect on them. |
+| `transformers.virtualize` | Opt-in int-only VM for eligible static methods (parameters/return `int`/`void`, no objects/exceptions/calls). Unsupported methods are left untouched. |
 | `hardening.maxOverhead` | Growth cap for the noise transforms: each method gains at most `(maxOverhead − 1) × its size` extra instructions. `2.0` = up to double the instructions. |
 | `hardening.deadBranchesPerMethod` | Max decoy blocks `DeadCode` inserts per method. |
 | `hardening.flowSplitsPerMethod` | Max edits `FlowShuffle` performs per method (splits + perturbations + inversions). |
 | `hardening.flattenMaxBlocks` | Methods with more basic blocks than this stay unflattened (default `128`; also capped at 2000 instructions). |
+| `hardening.flattenMinBlocks` | Minimum basic blocks before flattening (default `2`). |
+| `hardening.splitSingleBlock` | Add an opaque entry branch to straight-line methods so they become flattenable. |
+| `hardening.blockSplitMinInstructions` | Minimum method size for `BlockSplit` (default `6`). |
+| `hardening.virtualizeMaxInstructions` | Instruction cap for the int-only virtualizer (default `400`). |
+| `protection.encryptClasses` | Encrypt class entries and embed the bootstrap loader; requires a manifest `Main-Class`. Executable `java -jar` output only. |
+| `protection.verifyIntegrity` | Store/verify a CRC32 of each plaintext class (requires class encryption). |
+
+## Encrypted-class mode
+
+`protection.encryptClasses` is for **executable jars** launched with `java -jar`. The final
+write pass encrypts each class entry, appends an unencrypted bootstrap loader, and rewrites the
+manifest to point `Main-Class` at the loader while retaining the application entry point in
+`Vapor-Main-Class`. The loader decodes classes through the system jar resource and defines them
+with the child `ClassLoader`; library classes without the Vapor header fall back to the parent.
+
+`protection.verifyIntegrity` (default `true`) prepends a CRC32 of the plaintext class to each
+encrypted entry. The loader verifies it before `defineClass`; a modified ciphertext fails with a
+`SecurityException` (or a class-loading failure) instead of running. The key is embedded in the
+loader: this is a static-analysis barrier and tamper evidence, **not** cryptographic secrecy
+against a process dump.
+
+The mode intentionally skips libraries without a `Main-Class`, signed jars, multi-release jars,
+agents and modular jars. `java -cp protected.jar Main` does not use the loader; use `java -jar`.
+Do not distribute `mapping.txt` if names must stay hidden.
 
 ## Keep rules — what is never renamed
 
@@ -140,7 +192,8 @@ whole key. Automatic anchors:
 - enum `values()` / `valueOf()` and `ACC_ENUM` constants;
 - `serialVersionUID` and serialization hooks (`writeObject`, `readObject`, `readObjectNoData`,
   `writeReplace`, `readResolve`) on `Serializable` classes;
-- record component fields and their accessors (component **names** are kept);
+- record component fields and their accessors (component **names** are kept by default;
+  `transformers.obfuscateRecords` renames the field, accessor and `RecordComponent` attribute together);
 - all methods of annotation types (annotation use-sites store element names as plain strings);
 - every member key declared both by a jar class and by a reachable library supertype (override
   safety), plus every key whose call-site resolution lands on a library member (e.g. `name()`
@@ -165,13 +218,15 @@ dev.sample.Circle -> a:
 Kept classes/members appear as identity lines. Synthetic artifacts (string decryptors, the
 watermark field before renaming) show up under their generated names.
 
-## Known limitations (v1/v2/v3, intentional)
+## Known limitations (v1-v5, intentional)
 
-- **Plaintext that stays plaintext:** `ConstantValue` field initializers, annotation element
-  values, record `toString` recipes, and string-concat recipes that contain literal control
-  characters (those ride in as `\u0002` bootstrap constants and are left untouched — fail-safe).
-  These are not `LDC` instructions.
-- **Record component names are kept** (the `ObjectMethods` bootstrap couples them).
+- **Plaintext that stays plaintext:** annotation element values, record `toString` recipes, and
+  string-concat recipes that contain literal control characters (those ride in as `\u0002`
+  bootstrap constants and are left untouched - fail-safe). Static final `String` `ConstantValue`
+  fields are moved into the encrypted `<clinit>` path when `strings.pool` and
+  `strings.encryptConstantValues` are on (the default); the watermark is the deliberate exception.
+- **Record component names are kept by default** (the `ObjectMethods` bootstrap couples them).
+  `transformers.obfuscateRecords` renames the field/accessor/metadata triplet together.
 - **Package structure is flattened** — renamed classes go to the root package.
 - **`module-info.class` disables renaming** (warning emitted): a modular jar's exports would
   otherwise lie about renamed packages.
@@ -181,14 +236,20 @@ watermark field before renaming) show up under their generated names.
   v53+); every decryptor is `ACC_SYNTHETIC`. Interfaces older than class-file v52 are promoted
   to v52 when a decryptor is injected (static interface methods need v52; the output targets
   Java 8+ anyway).
-- **Constructors** get `DeadCode` only after the `super()` / `this()` call, and `FlowShuffle` /
-  `FlowFlatten` leave them alone entirely.
-- **`FlowFlatten` coverage is deliberately bounded**: methods with try/catch (including
-  `synchronized` blocks), constructors, artificials, JSR/RET, more than 2000 instructions, or
-  more than `flattenMaxBlocks` blocks stay unflattened. Values live across a branch (ternaries,
-  short-circuit expressions) are *not* a skip reason since v3.6: they are spilled into fresh
-  locals on every edge and reloaded inside the target case. The remaining skip rules are what
-  keep the transform verifier-safe.
+- **Constructors** get `DeadCode` only after the `super()` / `this()` call; `FlowShuffle` leaves
+  them alone. `FlowFlatten` flattens the post-`super()` suffix when the prefix is branch-free,
+  allocation-free and contains exactly one constructor call; otherwise it skips.
+- **`FlowFlatten` coverage is deliberately bounded**: constructors with unprovable pre-super
+  prefixes, artificials, `<clinit>`, JSR/RET, unresolved try-range boundaries, more than 2000
+  instructions, or more than `flattenMaxBlocks` blocks stay unflattened. Try/catch
+  (including `synchronized`) is supported: ranges are split at boundaries and each moved block
+  gets its own table entry with handlers kept outside the dispatcher. Values live across a
+  branch (ternaries, short-circuit expressions) are spilled into fresh locals since v3.6. The
+  remaining skip rules are what keep the transform verifier-safe.
+- **The virtualizer is intentionally narrow:** eligible methods are static with only
+  `int`/`void` parameters/returns and arithmetic/branch bytecodes; objects, arrays, exceptions,
+  switches, field/method calls and initializers are left untouched. It is opt-in because the
+  generated interpreter adds a class and a dispatch loop per method.
 - Flattening drops the `LocalVariableTable` of rewritten methods (block reordering invalidates its
   ranges); the default pipeline strips those tables anyway.
 - **Noise transforms are budgeted, not maximal** — they trade size for readability, capped by
@@ -199,7 +260,7 @@ watermark field before renaming) show up under their generated names.
 ## Testing
 
 ```
-.\gradlew.bat test                                  # unit tests (hierarchy, predicates, shapes, flow)
+.\gradlew.bat test                                  # 56 unit/integration tests
 .\gradlew.bat gui                                   # launch the desktop UI from classes
 .\scripts\rig.ps1 -Sample hello                     # integration rig, Java 21 sample
 .\scripts\rig.ps1 -Sample legacy8                   # integration rig, Java 8 sample
@@ -222,8 +283,13 @@ java -Xverify:all tools\LoadCheck.java <jar>        # loads every class, touches
 The v2 acceptance test obfuscated **CFR itself** (`tools/cfr-0.152.jar`, 1302 classes, full v2
 defaults): all classes load under `-Xverify:all`, and the obfuscated CFR decompiles both a sample
 and its own obfuscated jar **byte-identically** to the pristine build (6/6 and 733/733 files).
-The 0.4.0 desktop release re-ran the CFR stress: 1302/1302 classes load clean, the obfuscated CFR
-starts, and the output hash is unchanged from 0.3.2.
+The 0.5.0 hardening release re-ran the CFR stress with the new defaults: 1302/1302 classes load
+under `-Xverify:all` and the output is deterministic. A protected `legacy8` jar (and a
+protected+virtualized Java 8 fixture) was also launched with the installed JDK 8
+(`-Xverify:all`, exit 0), confirming the loader and helper class-file v52 path. The new suites
+cover encrypted-jar determinism/tamper rejection, string pools and constant-value fields,
+record metadata, try/catch + constructor flattening, and the virtualizer (program encoding,
+differential execution, helper class-file version 52, and pipeline commit/load).
 
 ## Architecture
 

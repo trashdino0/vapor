@@ -19,6 +19,7 @@ import org.objectweb.asm.tree.LookupSwitchInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TableSwitchInsnNode;
+import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 import org.objectweb.asm.tree.IincInsnNode;
@@ -71,17 +72,38 @@ import java.util.Set;
  *   <li><b>Random, non-sequential states.</b> Unique ints from {@link Mix}, not
  *       {@code 0..n}; the default case throws {@code IllegalStateException}
  *       (defense in depth).</li>
- *   <li><b>Fail-safe skips:</b> abstract/native, constructors, artificials,
- *       try/catch (also covers synchronized blocks), JSR/RET, analyzer failure,
- *       fewer than {@link #MIN_BLOCKS} blocks, more than
- *       {@code hardening.flattenMaxBlocks} blocks, or more than
+ *   <li><b>Try/catch is flattened with handlers kept outside the dispatcher.</b>
+ *       Blocks are split at every try-range boundary so no range ever starts or ends
+ *       inside a basic block. Each moved block carries a fresh try/catch entry that
+ *       covers exactly that block's emitted copy; entries keep the original table
+ *       order, so overlapping ranges and catch-all ({@code finally},
+ *       {@code synchronized}) handlers keep their precedence. Handler entry blocks
+ *       are emitted verbatim after the dispatchers and reached only by the exception
+ *       table or a direct {@code goto}; they never join a switch frame. No generated
+ *       plumbing (state stores, spill reloads, jumps) can throw, so widening a range
+ *       over it is unobservable.</li>
+ *   <li><b>Constructors only when the pre-super prefix is provably untouched.</b>
+ *       The prefix must be branch-free, contain no {@code NEW} and exactly one
+ *       {@code invokespecial <init>} (the {@code super()}/{@code this()} call) whose
+ *       owner is the superclass or the class itself. Flattening then starts after
+ *       that call, where {@code this} is initialized; the prefix is emitted verbatim
+ *       before the entry dispatcher. Constructors with argument-evaluation control
+ *       flow, nested allocations before {@code super}, or exception ranges crossing
+ *       the prefix are skipped.</li>
+ *   <li><b>Fail-safe skips:</b> abstract/native, class initializers, artificials,
+ *       constructors with an unprovable pre-super prefix, JSR/RET, unresolved
+ *       try-range boundaries or jump targets, analyzer failure, fewer than
+ *       {@code hardening.flattenMinBlocks} blocks, more than
+ *       {@code hardening.flattenMaxBlocks} dispatched blocks, or more than
  *       {@link #MAX_INSTRUCTIONS} instructions.</li>
  * </ul>
  */
 public final class FlowFlatten extends Transformer {
 
-    private static final int MIN_BLOCKS = 3;
     private static final int MAX_INSTRUCTIONS = 2000;
+
+    /** Per-block range copies stay bounded well below the class file's u2 table length. */
+    private static final int MAX_TRY_ENTRIES = 4096;
 
     /**
      * Set {@code -Dvapor.debugFlatten=true} to log per-method skip reasons on stderr; add
@@ -127,20 +149,17 @@ public final class FlowFlatten extends Transformer {
             skip(method, "abstract/native");
             return;
         }
-        if ("<init>".equals(method.name)) {
-            skip(method, "constructor");
-            return; // uninitializedThis across the dispatcher is not worth the risk
-        }
-        if (method.tryCatchBlocks != null && !method.tryCatchBlocks.isEmpty()) {
-            skip(method, "try/catch table");
-            return;
+        if ("<clinit>".equals(method.name)) {
+            skip(method, "class initializer");
+            return; // keep pool/ConstantValue setup readable and compact
         }
         if (context != null && context.isArtificialMethod(owner.name, method.name, method.desc)) {
             skip(method, "artificial");
             return; // decryptors stay fast/small
         }
+        int minBlocks = Math.max(2, config.hardening.flattenMinBlocks);
         int instructionCount = method.instructions.size();
-        if (instructionCount < MIN_BLOCKS || instructionCount > MAX_INSTRUCTIONS) {
+        if (instructionCount < minBlocks || instructionCount > MAX_INSTRUCTIONS) {
             skip(method, "instruction count " + instructionCount);
             return;
         }
@@ -152,14 +171,90 @@ public final class FlowFlatten extends Transformer {
             }
         }
 
-        List<Block> blocks = split(method);
+        // Constructors: leave everything up to and including the super()/this() call alone.
+        // Only the suffix is a flattening region; the prefix is emitted verbatim.
+        AbstractInsnNode regionStart = method.instructions.getFirst();
+        int regionStartPos = 0;
+        if ("<init>".equals(method.name)) {
+            AbstractInsnNode init = constructorInit(owner, method);
+            if (init == null) {
+                skip(method, "constructor pre-super shape");
+                return;
+            }
+            regionStart = init.getNext();
+            regionStartPos = method.instructions.indexOf(init) + 1;
+            if (regionStart == null) {
+                skip(method, "empty post-super region");
+                return;
+            }
+        }
+
+        List<TryRegion> tryRegions = tryRegions(method, regionStartPos);
+        if (tryRegions == null) {
+            skip(method, "try/catch boundary");
+            return;
+        }
+        Set<LabelNode> boundaryLabels = new HashSet<>();
+        for (TryRegion region : tryRegions) {
+            boundaryLabels.add(region.start);
+            boundaryLabels.add(region.end);
+            boundaryLabels.add(region.handler);
+        }
+
+        List<Block> blocks = split(method, regionStart, boundaryLabels);
         if (blocks == null) {
             skip(method, "unresolved jump target");
             return;
         }
+        Map<LabelNode, Integer> labelBlocks = new HashMap<>();
+        for (int i = 0; i < blocks.size(); i++) {
+            for (LabelNode label : blocks.get(i).leadingLabels) {
+                labelBlocks.put(label, i);
+            }
+        }
+        boolean[] external = new boolean[blocks.size()];
+        for (TryRegion region : tryRegions) {
+            Integer handler = labelBlocks.get(region.handler);
+            if (handler == null) {
+                skip(method, "unresolved handler");
+                return;
+            }
+            region.handlerBlock = handler;
+            external[handler] = true;
+        }
+        if (!blocks.isEmpty() && external[0]) {
+            skip(method, "handler is entry block");
+            return;
+        }
+        int copiedTryEntries = 0;
+        for (int i = 0; i < blocks.size(); i++) {
+            Block block = blocks.get(i);
+            for (TryRegion region : tryRegions) {
+                if (region.startPos <= block.startPos && block.endPos <= region.endPos) {
+                    block.tryRegions.add(region);
+                    copiedTryEntries++;
+                } else if (region.startPos < block.endPos && block.startPos < region.endPos) {
+                    skip(method, "try boundary inside block " + i);
+                    return;
+                }
+            }
+        }
+        if (copiedTryEntries > MAX_TRY_ENTRIES) {
+            skip(method, "try entry budget " + copiedTryEntries);
+            return;
+        }
+        int dispatched = 0;
+        for (int i = 0; i < blocks.size(); i++) {
+            if (!external[i]) {
+                dispatched++;
+            }
+        }
         int maxBlocks = Math.max(2, config.hardening.flattenMaxBlocks);
-        if (blocks.size() < MIN_BLOCKS || blocks.size() > maxBlocks) {
-            skip(method, "block count " + blocks.size());
+        // Handler blocks stay out of the switch, so they cost no cases. The minimum
+        // counts real branches: a try/catch method with one dispatchable block and one
+        // handler is already non-linear even when its try body is straight-line.
+        if (blocks.size() < minBlocks || dispatched < 1 || dispatched > maxBlocks) {
+            skip(method, "block count " + blocks.size() + " (dispatched " + dispatched + ")");
             return;
         }
 
@@ -180,12 +275,8 @@ public final class FlowFlatten extends Transformer {
             return;
         }
 
-        Map<LabelNode, Integer> labelBlocks = new HashMap<>();
         for (int i = 0; i < blocks.size(); i++) {
             Block block = blocks.get(i);
-            for (LabelNode label : block.leadingLabels) {
-                labelBlocks.put(label, i);
-            }
             int index = method.instructions.indexOf(block.start);
             Frame<BasicValue> frame = index < 0 ? null : frames[index];
             if (frame == null) {
@@ -193,6 +284,12 @@ public final class FlowFlatten extends Transformer {
                 return;
             }
             block.frame = frame;
+            if (external[i]) {
+                // Handlers are never reloaded or spilled. Their incoming operand stack is
+                // supplied by the VM (or preserved by a direct goto), so an ambiguous merge
+                // of several catch types cannot block flattening the rest of the method.
+                continue;
+            }
             int stackSize = frame.getStackSize();
             block.stackTypes = new Type[stackSize];
             StringBuilder stackSignature = new StringBuilder(stackSize * 8);
@@ -200,6 +297,11 @@ public final class FlowFlatten extends Transformer {
                 BasicValue value = frame.getStack(slot);
                 Type type = value == null ? null : value.getType();
                 if (type == null || type.getSort() == Type.METHOD || type.getSort() == Type.VOID) {
+                    if (DEBUG) {
+                        System.err.println("[flatten] block " + i + " stack slot " + slot
+                                + " value=" + value + " frameStack=" + frame.getStackSize()
+                                + " startOpcode=" + block.start.getOpcode());
+                    }
                     skip(method, "unsupported stack value in block " + i);
                     return;
                 }
@@ -238,6 +340,9 @@ public final class FlowFlatten extends Transformer {
         // without it (unit fixtures) an ambiguous merge still gets a private dispatcher.
         Map<String, List<Integer>> grouped = new LinkedHashMap<>();
         for (int i = 0; i < blocks.size(); i++) {
+            if (external[i]) {
+                continue; // handlers run in place, never through a switch frame
+            }
             String locals = signature(blocks.get(i).frame, hierarchy != null);
             String key = locals == null ? "#" + i : locals + "||" + blocks.get(i).stackSignature;
             grouped.computeIfAbsent(key, ignored -> new ArrayList<>()).add(i);
@@ -259,7 +364,8 @@ public final class FlowFlatten extends Transformer {
             }
             for (int i = 0; i < blocks.size(); i++) {
                 Block block = blocks.get(i);
-                System.err.println("[flatten-target] block " + i + " group=" + groupOf.get(i)
+                System.err.println("[flatten-target] block " + i
+                        + " group=" + (external[i] ? "handler" : groupOf.get(i))
                         + " stack=" + block.stackSignature
                         + " locals=" + signature(block.frame, hierarchy != null)
                         + " successors=" + java.util.Arrays.toString(block.successors));
@@ -299,8 +405,12 @@ public final class FlowFlatten extends Transformer {
         method.maxLocals = cursor;
 
         LabelNode[] blockLabels = new LabelNode[blocks.size()];
+        LabelNode[] externalLabels = new LabelNode[blocks.size()];
         for (int i = 0; i < blockLabels.length; i++) {
             blockLabels[i] = new LabelNode();
+            if (external[i]) {
+                externalLabels[i] = new LabelNode();
+            }
         }
         LabelNode[] loopLabels = new LabelNode[groups.size()];
         LabelNode[] defaultLabels = new LabelNode[groups.size()];
@@ -309,14 +419,23 @@ public final class FlowFlatten extends Transformer {
             defaultLabels[group] = new LabelNode();
         }
 
-        // Detach the original nodes so they can be re-linked in the flattened order.
+        // Detach the flattening region; a constructor's pre-super prefix stays where it is.
         InsnList original = method.instructions;
-        while (original.size() > 0) {
-            original.remove(original.getFirst());
+        List<AbstractInsnNode> prefix = new ArrayList<>();
+        for (AbstractInsnNode insn = original.getFirst(); insn != regionStart; insn = insn.getNext()) {
+            prefix.add(insn);
+        }
+        for (AbstractInsnNode insn = regionStart; insn != null; ) {
+            AbstractInsnNode next = insn.getNext();
+            original.remove(insn);
+            insn = next;
         }
 
-        Emitter emitter = new Emitter(stateSlot, keys, groupOf, loopLabels, blocks);
+        Emitter emitter = new Emitter(stateSlot, keys, groupOf, loopLabels, blocks, external, externalLabels);
         InsnList out = new InsnList();
+        for (AbstractInsnNode insn : prefix) {
+            out.add(insn);
+        }
         out.add(Insns.intNode(keys[0]));
         out.add(new VarInsnNode(Opcodes.ISTORE, stateSlot));
         out.add(new JumpInsnNode(Opcodes.GOTO, loopLabels[groupOf.get(0)]));
@@ -346,7 +465,7 @@ public final class FlowFlatten extends Transformer {
             out.add(new LookupSwitchInsnNode(defaultLabels[group], caseKeys, caseLabels));
 
             for (int block : members) {
-                emitter.block(out, block, blockLabels);
+                emitter.block(out, block, blockLabels, true);
             }
 
             out.add(defaultLabels[group]);
@@ -356,7 +475,17 @@ public final class FlowFlatten extends Transformer {
             out.add(new InsnNode(Opcodes.ATHROW));
         }
 
+        // Exception handlers keep their original relative order after the dispatchers.
+        // Their outgoing edges still go through the state machine; incoming edges are
+        // either exception-table entries or direct gotos from outside the dispatcher.
+        for (int i = 0; i < blocks.size(); i++) {
+            if (external[i]) {
+                emitter.block(out, i, blockLabels, false);
+            }
+        }
+
         method.instructions = out;
+        method.tryCatchBlocks = emitter.tryCatchBlocks();
 
         // Reordering blocks invalidates local-variable ranges. The default pipeline strips
         // them earlier (MetadataHygiene), but stay self-contained and safe when stripping is
@@ -366,14 +495,142 @@ public final class FlowFlatten extends Transformer {
         method.invisibleLocalVariableAnnotations = null;
         if (DEBUG) {
             System.err.println("[flatten] ok " + method.name + method.desc
-                    + ": blocks=" + blocks.size() + ", dispatchers=" + groups.size()
-                    + ", spilled=" + spilled);
+                    + ": blocks=" + blocks.size() + ", dispatched=" + dispatched
+                    + ", handlers=" + (blocks.size() - dispatched)
+                    + ", dispatchers=" + groups.size() + ", spilled=" + spilled
+                    + ", tryEntries=" + tryRegions.size() + "->" + copiedTryEntries);
         }
     }
 
     private static void skip(MethodNode method, String reason) {
         if (DEBUG) {
             System.err.println("[flatten] skip " + method.name + method.desc + ": " + reason);
+        }
+    }
+
+    /**
+     * Reads the exception table and rejects anything a constructor's untouched prefix
+     * could straddle. Empty ranges stay empty and never protect an instruction.
+     *
+     * <p>Type annotations on rebuilt entries are not copied: duplicating them per
+     * moved block would require rebasing each annotation's exception-table index.</p>
+     *
+     * @return original-order regions (possibly empty), or {@code null} when unsupported
+     */
+    private static List<TryRegion> tryRegions(MethodNode method, int regionStartPos) {
+        List<TryRegion> regions = new ArrayList<>();
+        if (method.tryCatchBlocks == null) {
+            return regions;
+        }
+        for (TryCatchBlockNode block : method.tryCatchBlocks) {
+            int startPos = method.instructions.indexOf(block.start);
+            int endPos = method.instructions.indexOf(block.end);
+            int handlerPos = method.instructions.indexOf(block.handler);
+            if (startPos < regionStartPos || endPos < regionStartPos || handlerPos < regionStartPos) {
+                return null;
+            }
+            if (endPos < startPos) {
+                return null;
+            }
+            if (startPos == endPos) {
+                continue;
+            }
+            regions.add(new TryRegion(block.start, block.end, block.handler, block.type, startPos, endPos));
+        }
+        return regions;
+    }
+
+    /**
+     * Proves the pre-{@code super()} prefix is safe to leave in place.
+     *
+     * <p>The verifier guarantees that a constructor's {@code this} is uninitialized
+     * until the first {@code invokespecial &lt;init&gt;} that consumes it. A prefix
+     * that starts with {@code aload_0}, has no branches, {@code NEW}s, returns or
+     * throws, and has exactly one {@code <init>} call (to the superclass or the class
+     * itself), can only be the {@code super()}/{@code this()} chain: argument
+     * evaluation can call ordinary methods and write synthetic fields, but cannot leak
+     * an uninitialized value or create a second initialization path. Everything after
+     * that call sees an initialized {@code this}, so the normal dispatcher rules
+     * apply.</p>
+     *
+     * @return the super/this call, or {@code null} when the prefix is not provable
+     */
+    private static AbstractInsnNode constructorInit(ClassNode owner, MethodNode method) {
+        if (owner.superName == null) {
+            return null; // java/lang/Object has no super constructor of its own
+        }
+        AbstractInsnNode init = null;
+        boolean firstReal = true;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (init != null) {
+                break; // only the prefix is constrained; the suffix is flattened normally
+            }
+            int opcode = insn.getOpcode();
+            if (opcode < 0) {
+                continue;
+            }
+            if (firstReal) {
+                if (opcode != Opcodes.ALOAD || ((VarInsnNode) insn).var != 0) {
+                    return null; // this must be the first value the constructor touches
+                }
+                firstReal = false;
+            }
+            if (insn instanceof JumpInsnNode
+                    || insn instanceof TableSwitchInsnNode
+                    || insn instanceof LookupSwitchInsnNode
+                    || opcode == Opcodes.NEW
+                    || opcode == Opcodes.JSR
+                    || opcode == Opcodes.RET
+                    || opcode == Opcodes.IRETURN
+                    || opcode == Opcodes.LRETURN
+                    || opcode == Opcodes.FRETURN
+                    || opcode == Opcodes.DRETURN
+                    || opcode == Opcodes.ARETURN
+                    || opcode == Opcodes.RETURN
+                    || opcode == Opcodes.ATHROW
+                    || opcode == Opcodes.MONITORENTER
+                    || opcode == Opcodes.MONITOREXIT) {
+                return null;
+            }
+            if (opcode == Opcodes.INVOKESPECIAL) {
+                MethodInsnNode call = (MethodInsnNode) insn;
+                if ("<init>".equals(call.name)) {
+                    if (!call.owner.equals(owner.name) && !call.owner.equals(owner.superName)) {
+                        return null; // some other object's constructor before this is initialized
+                    }
+                    init = insn;
+                }
+            }
+        }
+        if (init == null) {
+            return null;
+        }
+        for (AbstractInsnNode insn = init.getNext(); insn != null; insn = insn.getNext()) {
+            if (insn.getOpcode() >= 0) {
+                return init;
+            }
+        }
+        return null; // nothing to flatten after the call
+    }
+
+    /** One original try/catch table entry and its instruction positions. */
+    private static final class TryRegion {
+
+        final LabelNode start;
+        final LabelNode end;
+        final LabelNode handler;
+        final String type;
+        final int startPos;
+        final int endPos;
+        int handlerBlock = -1;
+
+        TryRegion(LabelNode start, LabelNode end, LabelNode handler, String type, int startPos, int endPos) {
+            this.start = start;
+            this.end = end;
+            this.handler = handler;
+            this.type = type;
+            this.startPos = startPos;
+            this.endPos = endPos;
         }
     }
 
@@ -385,20 +642,40 @@ public final class FlowFlatten extends Transformer {
         private final Map<Integer, Integer> groupOf;
         private final LabelNode[] loopLabels;
         private final List<Block> blocks;
+        private final boolean[] external;
+        private final LabelNode[] externalLabels;
+        private final List<TryCatchBlockNode> tryCatchBlocks = new ArrayList<>();
 
         Emitter(int stateSlot, int[] keys, Map<Integer, Integer> groupOf, LabelNode[] loopLabels,
-                List<Block> blocks) {
+                List<Block> blocks, boolean[] external, LabelNode[] externalLabels) {
             this.stateSlot = stateSlot;
             this.keys = keys;
             this.groupOf = groupOf;
             this.loopLabels = loopLabels;
             this.blocks = blocks;
+            this.external = external;
+            this.externalLabels = externalLabels;
         }
 
-        void block(InsnList out, int index, LabelNode[] blockLabels) {
+        List<TryCatchBlockNode> tryCatchBlocks() {
+            return tryCatchBlocks;
+        }
+
+        void block(InsnList out, int index, LabelNode[] blockLabels, boolean dispatched) {
             Block block = blocks.get(index);
-            out.add(blockLabels[index]);
-            reload(out, block);
+            if (dispatched) {
+                out.add(blockLabels[index]);
+                reload(out, block);
+            } else {
+                // Handlers are entered by the VM (or a direct goto), not by the switch;
+                // their frame already has the exception on the operand stack.
+                out.add(externalLabels[index]);
+            }
+            LabelNode covered = null;
+            if (!block.tryRegions.isEmpty()) {
+                covered = new LabelNode();
+                out.add(covered);
+            }
             for (AbstractInsnNode node : block.nodes) {
                 if (node != block.terminator) {
                     out.add(node);
@@ -437,6 +714,18 @@ public final class FlowFlatten extends Transformer {
                 // IRETURN..RETURN / ATHROW: the block leaves the method as before.
                 out.add(terminator);
             }
+
+            if (covered != null) {
+                // One exact range per moved block. Entries are added in original table
+                // order, which is all the VM needs: ranges of different blocks never
+                // overlap, and within this range the relative precedence is preserved.
+                LabelNode end = new LabelNode();
+                out.add(end);
+                for (TryRegion region : block.tryRegions) {
+                    tryCatchBlocks.add(new TryCatchBlockNode(covered, end,
+                            externalLabels[region.handlerBlock], region.type));
+                }
+            }
         }
 
         /** Reloads a block's incoming operand stack inside its case (bottom to top). */
@@ -471,6 +760,10 @@ public final class FlowFlatten extends Transformer {
         }
 
         private void state(InsnList out, int target) {
+            if (external[target]) {
+                out.add(new JumpInsnNode(Opcodes.GOTO, externalLabels[target]));
+                return;
+            }
             Block block = blocks.get(target);
             int[] slots = block.spillLocals;
             if (slots != null) {
@@ -484,10 +777,15 @@ public final class FlowFlatten extends Transformer {
         }
     }
 
-    /** @return basic blocks in instruction order, or {@code null} for unsupported shapes. */
-    private static List<Block> split(MethodNode method) {
+    /**
+     * @param start      first instruction of the region to split (a constructor's
+     *                   post-super suffix, or the whole method)
+     * @param boundaries extra labels that must begin a block (try start/end/handler)
+     * @return basic blocks in instruction order, or {@code null} for unsupported shapes
+     */
+    private static List<Block> split(MethodNode method, AbstractInsnNode start, Set<LabelNode> boundaries) {
         Set<LabelNode> targets = new HashSet<>();
-        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+        for (AbstractInsnNode insn = start; insn != null; insn = insn.getNext()) {
             if (insn instanceof JumpInsnNode jump) {
                 targets.add(jump.label);
             } else if (insn instanceof TableSwitchInsnNode table) {
@@ -498,12 +796,14 @@ public final class FlowFlatten extends Transformer {
                 targets.addAll(lookup.labels);
             }
         }
+        Set<LabelNode> leaderLabels = new HashSet<>(targets);
+        leaderLabels.addAll(boundaries);
 
         Set<AbstractInsnNode> leaders = new HashSet<>();
         Set<LabelNode> pendingLabels = new HashSet<>();
         AbstractInsnNode previous = null;
         boolean afterTerminator = false;
-        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+        for (AbstractInsnNode insn = start; insn != null; insn = insn.getNext()) {
             if (insn instanceof LabelNode label) {
                 pendingLabels.add(label);
                 continue;
@@ -514,7 +814,7 @@ public final class FlowFlatten extends Transformer {
             boolean leader = previous == null || afterTerminator;
             if (!leader) {
                 for (LabelNode label : pendingLabels) {
-                    if (targets.contains(label)) {
+                    if (leaderLabels.contains(label)) {
                         leader = true;
                         break;
                     }
@@ -531,11 +831,12 @@ public final class FlowFlatten extends Transformer {
         List<Block> blocks = new ArrayList<>();
         Block current = null;
         List<AbstractInsnNode> pending = new ArrayList<>();
-        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+        for (AbstractInsnNode insn = start; insn != null; insn = insn.getNext()) {
             if (insn.getOpcode() < 0) {
                 pending.add(insn);
                 continue;
             }
+            int position = method.instructions.indexOf(insn);
             if (current == null || leaders.contains(insn)) {
                 current = new Block();
                 blocks.add(current);
@@ -553,7 +854,9 @@ public final class FlowFlatten extends Transformer {
             current.nodes.add(insn);
             if (current.start == null) {
                 current.start = insn;
+                current.startPos = position;
             }
+            current.endPos = position + 1;
             if (endsBlock(insn)) {
                 current.terminator = insn;
                 current = null;
@@ -910,8 +1213,11 @@ public final class FlowFlatten extends Transformer {
 
         final List<AbstractInsnNode> nodes = new ArrayList<>();
         final List<LabelNode> leadingLabels = new ArrayList<>();
+        final List<TryRegion> tryRegions = new ArrayList<>();
         AbstractInsnNode start;
         AbstractInsnNode terminator;
+        int startPos = -1;
+        int endPos = -1;
         Frame<BasicValue> frame;
         Type[] stackTypes = new Type[0];
         String stackSignature = "";

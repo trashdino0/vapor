@@ -20,9 +20,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * v3.3 differential execution: the flattened fixture must compute exactly the same
  * values as the original for a table of extreme and ordinary inputs. The fixture
- * covers loops, dense and sparse switches, early exits, a skipped try/catch method,
- * ternary/live-stack spills and an uninitialized {@code NEW} in a constructor argument;
- * a second test checks that transformation is deterministic.
+ * covers loops, dense and sparse switches, early exits, a try/catch method (flattened
+ * with handlers kept outside the dispatcher), ternary/live-stack spills and an
+ * uninitialized {@code NEW} in a constructor argument; a second test checks that
+ * transformation is deterministic.
  */
 class FlowFlattenTest {
 
@@ -48,8 +49,8 @@ class FlowFlattenTest {
                 "expected dispatchers to add switches (" + switches(original) + " -> " + switches(transformed) + ")");
         assertTrue(switchCount(transformed, "state4") > switchCount(original, "state4"),
                 "ternary values are spilled, so state4 should now be flattened");
-        assertEquals(0, switchCount(transformed, "guarded"),
-                "methods with an exception table must be skipped");
+        assertTrue(switchCount(transformed, "guarded") > switchCount(original, "guarded"),
+                "methods with an exception table are flattened with handlers outside the dispatcher");
         assertTrue(switchCount(transformed, "state5") > switchCount(original, "state5"),
                 "dense-switch method should be flattened (dispatcher switch added)");
         assertTrue(switchCount(transformed, "state6") > switchCount(original, "state6"),

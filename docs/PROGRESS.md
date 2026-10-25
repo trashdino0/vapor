@@ -23,6 +23,7 @@
 | v3.5 | Post-release flattening fixes (0.3.1) | ✅ Done (2026-10-19) |
 | v3.6 | Spilled entry stacks + verifier-accurate `NEW` tracking (0.3.2) | ✅ Done (2026-10-25) |
 | v4.0 | Desktop GUI + shared CLI/GUI runner (0.4.0) | ✅ Done (2026-10-25) |
+| v5.0 | Hardening 2.0 + encrypted-class loader + int VM (0.5.0) | ✅ Done (2026-10-25) |
 
 **v1 is complete** — renaming + metadata hygiene + string encryption (+ watermark), rig-verified
 on Java 21 and Java 8 samples.
@@ -45,6 +46,13 @@ the CLI. It has jar/output/mapping pickers, library and keep-rule editing, every
 hardening setting, config load/save, a live pipeline log, stage progress and cooperative cancel.
 The GUI writes to temporary files and only replaces the target after success, so failed/cancelled
 runs are safe. CLI behavior and bytes are unchanged for the same input and config.
+
+**v5 (hardening 2.0) is complete (0.5.0)** - the static layer now includes a per-class
+encoded string pool (all non-empty strings), `ConstantValue` string encryption, record-component
+renaming (opt-in), annotation stripping (opt-in), `BlockSplit`, and try/catch + safe constructor
+flattening. The runtime layer adds opt-in class encryption with a Java 8 loader and CRC32
+integrity headers (tamper-evident), plus a conservative int-only method virtualizer. All new
+features are deterministic; the full test suite, three rigs and a 1302-class CFR LoadCheck pass.
 
 ## Phase 0 — Bootstrap ✅ (2026-10-17)
 

@@ -101,6 +101,7 @@ public final class StringEncryptor extends Transformer {
     @Override
     public void run(Context context) {
         for (JClass clazz : context.classes()) {
+            context.checkCancelled();
             String decryptor = encrypt(clazz.node());
             if (decryptor != null) {
                 context.addArtificialMethod(clazz.node().name, decryptor, DECRYPTOR_DESC);

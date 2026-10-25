@@ -1,21 +1,9 @@
 package dev.vapor;
 
 import dev.vapor.config.VaporConfig;
-import dev.vapor.context.Context;
-import dev.vapor.pipeline.Pipeline;
-import dev.vapor.pipeline.postprocess.JarWrite;
-import dev.vapor.pipeline.postprocess.MappingExport;
-import dev.vapor.pipeline.postprocess.ResourceFixups;
-import dev.vapor.pipeline.preprocess.JarLoad;
-import dev.vapor.transform.impl.DeadCode;
-import dev.vapor.transform.impl.FlowFlatten;
-import dev.vapor.transform.impl.FlowShuffle;
-import dev.vapor.transform.impl.IntObfuscation;
-import dev.vapor.transform.impl.MetadataHygiene;
-import dev.vapor.transform.impl.Renamer;
-import dev.vapor.transform.impl.StringEncryptor;
-import dev.vapor.transform.impl.Watermark;
+import dev.vapor.gui.VaporGui;
 
+import java.awt.GraphicsEnvironment;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -24,18 +12,22 @@ import java.util.List;
 /**
  * Vapor — Java obfuscator.
  *
- * <p>v1 pipeline: load → rename (classes/methods/fields, keep rules, mapping
- * export) → resource fix-ups → write. Metadata hygiene and string encryption
- * plug into the same pipeline.</p>
+ * <p>CLI front-end. With no arguments (or {@code --gui}) it opens the desktop
+ * UI; otherwise it parses the options and runs the shared
+ * {@link Obfuscator} pipeline.</p>
  */
 public final class Main {
 
-    private static final String VERSION = "0.3.2";
+    public static final String VERSION = "0.4.0";
 
     private Main() {
     }
 
     public static void main(String[] args) {
+        if (args.length == 0 || hasGuiFlag(args)) {
+            launchGui(args.length > 0);
+            return;
+        }
         try {
             System.exit(run(args));
         } catch (Exception e) {
@@ -43,6 +35,27 @@ public final class Main {
             e.printStackTrace(System.err);
             System.exit(2);
         }
+    }
+
+    private static boolean hasGuiFlag(String[] args) {
+        for (String arg : args) {
+            if (arg.equals("-g") || arg.equals("--gui")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void launchGui(boolean explicit) {
+        if (GraphicsEnvironment.isHeadless()) {
+            System.err.println("vapor: desktop GUI is unavailable in a headless environment");
+            if (explicit) {
+                System.exit(1);
+            }
+            printHelp();
+            return;
+        }
+        VaporGui.launch();
     }
 
     static int run(String[] args) throws Exception {
@@ -90,34 +103,15 @@ public final class Main {
         VaporConfig config = configPath == null ? VaporConfig.defaults() : VaporConfig.load(configPath);
         config.keep.addAll(cliKeep);
 
-        long start = System.nanoTime();
+        Obfuscator.Result result = Obfuscator.run(new Obfuscator.Request(
+                input, output, config, mappingPath, libraries, () -> false, null));
 
-        try (Context context = new Context(input, output, libraries)) {
-            new Pipeline()
-                    .preprocess(new JarLoad(input))
-                    .transformer(new Watermark(config))
-                    .transformer(new Renamer(config))
-                    .transformer(new MetadataHygiene(config))
-                    .transformer(new StringEncryptor(config))
-                    .transformer(new DeadCode(config))
-                    .transformer(new FlowShuffle(config))
-                    .transformer(new FlowFlatten(config))
-                    .transformer(new IntObfuscation(config))
-                    .postprocess(new ResourceFixups())
-                    .postprocess(new MappingExport(mappingPath))
-                    .postprocess(new JarWrite(output))
-                    .run(context);
-
-            int classCount = context.classes().size();
-            int resourceCount = context.entries().size() - classCount;
-
-            System.out.println("vapor " + VERSION);
-            System.out.println("in:   " + input.toAbsolutePath());
-            System.out.println("out:  " + output.toAbsolutePath());
-            System.out.println("classes: " + classCount + ", resources: " + resourceCount);
-            System.out.printf("size: %,d -> %,d bytes%n", Files.size(input), Files.size(output));
-            System.out.printf("time: %.0f ms%n", (System.nanoTime() - start) / 1_000_000.0);
-        }
+        System.out.println("vapor " + VERSION);
+        System.out.println("in:   " + input.toAbsolutePath());
+        System.out.println("out:  " + output.toAbsolutePath());
+        System.out.println("classes: " + result.classCount() + ", resources: " + result.resourceCount());
+        System.out.printf("size: %,d -> %,d bytes%n", result.inputSize(), result.outputSize());
+        System.out.printf("time: %.0f ms%n", result.millis());
         return 0;
     }
 
@@ -133,6 +127,8 @@ public final class Main {
                 vapor — Java obfuscator
 
                 usage:
+                  vapor                         launch the desktop GUI
+                  vapor --gui                   launch the desktop GUI
                   vapor -i <input.jar> -o <output.jar> [options]
 
                 options:
@@ -142,6 +138,7 @@ public final class Main {
                   -config <file>          JSON config (defaults: full v3 pipeline, hardening on)
                   -mapping <file>         write a ProGuard-style mapping file
                   -keep <glob>            keep class names matching the dotted glob (repeatable)
+                  -g, --gui               launch the desktop GUI
                   -v, --version           print version
                   -h, --help              this help
                 """);

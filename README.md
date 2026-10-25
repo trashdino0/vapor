@@ -1,22 +1,26 @@
 # Vapor
 
-A general-purpose Java obfuscator. v1 shipped the foundation: **renaming** (classes / methods /
-fields), **string encryption** and **metadata hygiene**. v2 adds **hardening**: opaque predicates,
-dead-branch injection, integer/long constant obfuscation, control-flow noise and polymorphic
-string decryptors. Everything is deterministic, budgeted and failsafe-by-default, with a
-ProGuard-style mapping export.
+A general-purpose Java obfuscator with both a CLI and a desktop GUI. v1 shipped the foundation:
+**renaming** (classes / methods / fields), **string encryption** and **metadata hygiene**. v2 adds
+**hardening**: opaque predicates, dead-branch injection, integer/long constant obfuscation,
+control-flow noise and polymorphic string decryptors. v3 adds concat-recipe encryption,
+float/double constants and bounded control-flow flattening with entry-stack spilling. Everything
+is deterministic, budgeted and failsafe-by-default, with a ProGuard-style mapping export.
 
 ```
 usage:
+  vapor                       launch the desktop GUI
+  vapor --gui                 launch the desktop GUI
   vapor -i <input.jar> -o <output.jar> [options]
 
 options:
   -i, --input <jar>       input jar
   -o, --output <jar>      output jar
   -lib, --library <path>  library jar or class directory (repeatable)
-  -config <file>          JSON config (defaults: full pipeline, v2 hardening on)
+  -config <file>          JSON config (defaults: full v3 pipeline, hardening on)
   -mapping <file>         write a ProGuard-style mapping file
   -keep <glob>            keep class names matching the dotted glob (repeatable)
+  -g, --gui               launch the desktop GUI
   -v, --version           print version
   -h, --help              this help
 ```
@@ -25,7 +29,7 @@ options:
 
 ```
 .\gradlew.bat build          # tests + shadow jar
-# → build\libs\vapor-0.3.2.jar
+# → build\libs\vapor-0.4.0.jar
 ```
 
 Requires JDK 21 to build (the output supports Java 8–21 class files; every class is written with
@@ -34,8 +38,26 @@ Requires JDK 21 to build (the output supports Java 8–21 class files; every cla
 ## Example
 
 ```
-java -jar build\libs\vapor-0.3.2.jar -i app.jar -o app-obf.jar -config vapor.json -mapping mapping.txt
+java -jar build\libs\vapor-0.4.0.jar -i app.jar -o app-obf.jar -config vapor.json -mapping mapping.txt
 ```
+
+## Desktop GUI
+
+```
+java -jar build\libs\vapor-0.4.0.jar --gui
+# or, from the source tree:
+.\gradlew.bat gui
+```
+
+Running the jar with no arguments also opens the GUI. It provides input/output/mapping pickers,
+library paths, keep-rule editing, per-transform switches, all string/hardening knobs, config
+load/save, a live pipeline log and a determinate progress bar with cooperative cancellation.
+
+The GUI calls the same `Obfuscator` core as the CLI, so output is byte-identical for the same
+input and config. It writes to temporary files beside the target and moves them into place only
+after a successful run: a failed or cancelled job never replaces an existing output jar. The
+`Cancel` button stops at the next safe point (between stages and while iterating classes); the
+partial temporary output is deleted.
 
 ## What Vapor does
 
@@ -178,6 +200,7 @@ watermark field before renaming) show up under their generated names.
 
 ```
 .\gradlew.bat test                                  # unit tests (hierarchy, predicates, shapes, flow)
+.\gradlew.bat gui                                   # launch the desktop UI from classes
 .\scripts\rig.ps1 -Sample hello                     # integration rig, Java 21 sample
 .\scripts\rig.ps1 -Sample legacy8                   # integration rig, Java 8 sample
 .\scripts\rig.ps1 -Sample hardening                 # integration rig, v2 hardening sample
@@ -199,17 +222,21 @@ java -Xverify:all tools\LoadCheck.java <jar>        # loads every class, touches
 The v2 acceptance test obfuscated **CFR itself** (`tools/cfr-0.152.jar`, 1302 classes, full v2
 defaults): all classes load under `-Xverify:all`, and the obfuscated CFR decompiles both a sample
 and its own obfuscated jar **byte-identically** to the pristine build (6/6 and 733/733 files).
+The 0.4.0 desktop release re-ran the CFR stress: 1302/1302 classes load clean, the obfuscated CFR
+starts, and the output hash is unchanged from 0.3.2.
 
 ## Architecture
 
 ```
 dev.vapor
-├── Main                     CLI + pipeline wiring
+├── Main                     CLI + GUI launch, option parsing
+├── Obfuscator               shared CLI/GUI pipeline entry point
+├── gui/VaporGui             Swing front-end: form, worker, log, progress, cancel
 │                            (watermark → rename → hygiene → strings → deadcode → flow → ints)
 ├── config/VaporConfig       Gson config model
 ├── context/                 Context, JClass, JarEntry, SimpleHierarchy, LibraryLoader, JarIO
 ├── naming/                  Dictionary, Mappings, RemapperImpl, VaporClassRemapper
-├── pipeline/                Pipeline, JarLoad, JarWrite, ResourceFixups, MappingExport
+├── pipeline/                Pipeline, PipelineListener, JarLoad, JarWrite, ResourceFixups, MappingExport
 ├── transform/impl/          Watermark, Renamer, MetadataHygiene, StringEncryptor,
 │                            DeadCode, FlowShuffle, IntObfuscation, Junk, OpaquePredicates
 └── util/                    Insns, Mix (deterministic mixing + xorshift32)
@@ -221,7 +248,8 @@ the apply phase computes every remapped class **before** committing anything; `J
 all stack map frames through the (post-rename) hierarchy; zip entries get fixed timestamps so
 output is byte-identical across runs; every v2 transform is an in-place insertion (no block
 reordering) with a per-method instruction budget, and all randomness runs through `Mix`
-(`seed` + owner + method), never wall-clock time.
+(`seed` + owner + method), never wall-clock time. The GUI and CLI both call `Obfuscator`, so
+front-end choice cannot change the produced bytes.
 
 `docs/NOTES.md` carries the deeper engineering notes; `docs/PROGRESS.md` tracks the phase log;
 `PLAN.md` is the master plan.

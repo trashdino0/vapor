@@ -70,6 +70,7 @@ public final class FlowShuffle extends Transformer {
     @Override
     public void run(Context context) {
         for (JClass clazz : context.classes()) {
+            context.checkCancelled();
             ClassNode owner = clazz.node();
             for (MethodNode method : owner.methods) {
                 try {

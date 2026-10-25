@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "dev.vapor"
-version = "0.3.2"
+version = "0.4.0"
 
 java {
     toolchain {
@@ -43,3 +43,12 @@ tasks.shadowJar {
 tasks.build {
     dependsOn(tasks.shadowJar)
 }
+
+tasks.register<JavaExec>("gui") {
+    group = "application"
+    description = "Launch the Vapor desktop GUI"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("dev.vapor.Main")
+    args("--gui")
+}
+

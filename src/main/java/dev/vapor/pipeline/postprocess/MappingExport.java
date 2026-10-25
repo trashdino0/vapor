@@ -41,10 +41,12 @@ public final class MappingExport implements IPass {
         if (path == null) {
             return;   // no -mapping flag
         }
+        context.checkCancelled();
         StringBuilder out = new StringBuilder();
         if (context.mappings().export().isEmpty()) {
             // Renaming never ran (disabled or skipped): emit identity mappings.
             for (JClass clazz : context.classes()) {
+                context.checkCancelled();
                 String dotted = clazz.name().replace('/', '.');
                 out.append(dotted).append(" -> ").append(dotted).append(":\n");
                 for (FieldNode field : clazz.node().fields) {
@@ -58,6 +60,7 @@ public final class MappingExport implements IPass {
             }
         } else {
             for (Mappings.ClassMapping mapping : context.mappings().export()) {
+                context.checkCancelled();
                 out.append(mapping.original().replace('/', '.')).append(" -> ")
                         .append(mapping.renamed().replace('/', '.')).append(":\n");
                 for (Mappings.MemberMapping member : mapping.members()) {

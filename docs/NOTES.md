@@ -10,9 +10,12 @@
 - Gradle 9.8.1 was downloaded to `%TEMP%\opencode\gradle-9.8.1\bin\gradle.bat` (temp — may
   vanish). The project has a wrapper: prefer `.\gradlew.bat <task>`. First wrapper run downloads
   the dist into `~/.gradle/wrapper/dists/` (one-time, ~130 MB).
-- Build: `.\gradlew.bat build` → fat jar `build\libs\vapor-0.3.2.jar` (`shadowJar` alone builds
+- Build: `.\gradlew.bat build` → fat jar `build\libs\vapor-0.4.0.jar` (`shadowJar` alone builds
   just the jar).
-- Run: `java -jar build\libs\vapor-0.3.2.jar -i in.jar -o out.jar`
+- Run: `java -jar build\libs\vapor-0.4.0.jar -i in.jar -o out.jar`
+- GUI: `java -jar build\libs\vapor-0.4.0.jar --gui` (or no arguments; `.\gradlew.bat gui` runs
+  from classes). Swing is part of the JDK — no new dependency and nothing extra to package.
+  Headless environments refuse to launch it and print the CLI help instead.
 - Rig: `.\scripts\rig.ps1 -Sample hello` / `-Sample legacy8` / `-Sample hardening`; `-Build`
   builds first; `-SkipDecompile` for speed. Workspace:
   `%TEMP%\opencode\vapor-rig\<sample>-<release>\` with
@@ -284,7 +287,7 @@ Shadow `com.gradleup.shadow` 9.6.1 · Gradle 9.8.1 · Java toolchain 21.
 ### Stress-test recipe (the strongest correctness gate we have)
 
 ```
-java -jar build\libs\vapor-0.3.2.jar -i cfr.jar -o cfr-obf.jar        # full v3 defaults
+java -jar build\libs\vapor-0.4.0.jar -i cfr.jar -o cfr-obf.jar        # full v3 defaults
 java -Xverify:all tools\LoadCheck.java cfr-obf.jar                     # expect 0 failures
 java -jar cfr-obf.jar <some.jar> --outputdir dec-obf                   # run the obfuscated CFR
 java -jar tools\cfr-0.152.jar <some.jar> --outputdir dec-base          # baseline
@@ -450,6 +453,39 @@ determinism `F6ED95782E1D3D1F8E5DCDCBADB0B29AAD7D34C68FD9A6F300C6920907D59F55`; 
   (`stepsFor` and `render` join `fnv1a`, `longest`, `main`, `countBelow`), both
   behavior-identical; CFR stress LoadCheck 1302/1302 clean, obfuscated CFR exit 0, 733/733
   self-decompile files byte-identical; determinism PASS. Version 0.3.2.
+
+### Desktop GUI (0.4.0)
+
+- Shared core: `dev.vapor.Obfuscator.run(Request)` builds the same pipeline for the CLI and GUI.
+  `Request` carries input/output/config/mapping/libraries, a `BooleanSupplier cancelled` and an
+  optional `PipelineListener`; `Result` returns class/resource counts, sizes and elapsed millis.
+  `Main` is now a thin parser + summary printer.
+- Progress: `PipelineListener` reports `(stage, passName, index, total)` before/after every
+  executed pass. Disabled transformers are excluded from `total`. `total` is
+  preprocess + enabled transforms + postprocess.
+- Cancellation: `Context` holds the supplier and `checkCancelled()` throws
+  `java.util.concurrent.CancellationException`. Checks are at every pipeline stage and inside
+  the per-class/per-entry loops (JarLoad, all transformers, Renamer phases, ResourceFixups,
+  MappingExport, JarWrite). `Renamer` rethrows `CancellationException` before its failsafe
+  `catch (RuntimeException | Error)` so Cancel is not downgraded to "left un-renamed".
+- Safe output: the GUI creates `.vapor-out-*` / `.vapor-map-*` temp files in the target
+  directories, runs with those paths, then moves them over the real targets with
+  `ATOMIC_MOVE` (fallback `REPLACE_EXISTING`). Cancel/failure deletes the temps, so an existing
+  output jar is never clobbered.
+- Config form: `readConfigFromForm()` builds a fresh `VaporConfig` from every control;
+  `applyConfigToForm()` loads one. `VaporConfig.save(Path)` writes pretty JSON via Gson, making
+  the GUI's Save config and the CLI's `-config` round-trip the same file.
+- Log capture gotcha: the GUI swaps `System.out`/`System.err` to a `LineOutputStream`. Never emit
+  a partial line from `flush()`: `PrintStream` flushes formatter chunks, which chops a line into
+  tokens. Split only on `\n`; call `finish()` after the run for a trailing partial line. The
+  first GUI smoke run exposed exactly this (311 short lines instead of 26).
+- Verification: 30/30 unit tests (new `ObfuscatorTest` and `PipelineTest`); all three rigs green;
+  offscreen GUI smoke on `demo-cli` produced a loadable 7-class jar + 1.8 KB mapping and a
+  normal log; cancellation smoke on the CFR jar produced `=== cancelled ===`, no output and no
+  leftover temp files; GUI config load/read matched every field. CFR stress re-run on 0.4.0:
+  1302/1302 LoadCheck clean, obfuscated CFR exit 0, output hash unchanged
+  (`F6ED…7D59F55`). The GUI is tested by driving the private form/worker via reflection in a
+  throwaway harness; batch tests stay headless.
 
 ## Reference-tool findings (from the earlier REA investigation — for Phase 2+)
 

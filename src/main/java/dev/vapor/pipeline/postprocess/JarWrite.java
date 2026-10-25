@@ -33,6 +33,7 @@ public final class JarWrite implements IPass {
     public void run(Context context) throws Exception {
         List<JarIO.Entry> written = new ArrayList<>(context.entries().size());
         for (JarEntry entry : context.entries()) {
+            context.checkCancelled();
             switch (entry) {
                 case JarEntry.Resource resource ->
                         written.add(new JarIO.Entry(resource.name(), resource.directory(), resource.bytes()));

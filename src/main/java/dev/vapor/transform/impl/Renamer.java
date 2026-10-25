@@ -36,6 +36,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.regex.Pattern;
 
 /**
@@ -104,6 +105,8 @@ public final class Renamer extends Transformer {
         }
         try {
             rename(context);
+        } catch (CancellationException e) {
+            throw e;
         } catch (RuntimeException | Error e) {
             if (!config.failsafe) {
                 throw e;
@@ -113,6 +116,7 @@ public final class Renamer extends Transformer {
     }
 
     private void rename(Context context) {
+        context.checkCancelled();
         List<JClass> classes = new ArrayList<>(context.classes());
         Mappings mappings = context.mappings();
 
@@ -125,6 +129,7 @@ public final class Renamer extends Transformer {
             keepPatterns.add(glob(pattern));
         }
         for (JClass clazz : classes) {
+            context.checkCancelled();
             String dotted = clazz.name().replace('/', '.');
             boolean kept = keepPatterns.stream().anyMatch(p -> p.matcher(dotted).matches())
                     || hasKeepAnnotation(clazz.node().visibleAnnotations)
@@ -152,6 +157,7 @@ public final class Renamer extends Transformer {
 
         // ---- automatic anchors: names the runtime/dispatch resolves by name ----
         for (JClass clazz : classes) {
+            context.checkCancelled();
             ClassNode node = clazz.node();
             boolean isEnum = (node.access & Opcodes.ACC_ENUM) != 0;
             boolean isAnnotation = (node.access & Opcodes.ACC_ANNOTATION) != 0;
@@ -197,6 +203,7 @@ public final class Renamer extends Transformer {
         // ---- anchors from library supertypes: a renamed member must not
         // accidentally override or hide a library member, so keep the key ----
         for (JClass clazz : classes) {
+            context.checkCancelled();
             ClassNode node = clazz.node();
             if (node.methods.isEmpty() && node.fields.isEmpty()) {
                 continue;
@@ -223,6 +230,7 @@ public final class Renamer extends Transformer {
         }
 
         for (JClass clazz : classes) {
+            context.checkCancelled();
             stripKeepAnnotations(clazz.node());
         }
 
@@ -243,6 +251,7 @@ public final class Renamer extends Transformer {
         if (config.transformers.renameMethods) {
             Set<String> reserved = new HashSet<>();
             for (JClass clazz : classes) {
+                context.checkCancelled();
                 for (MethodNode method : clazz.node().methods) {
                     reserved.add(method.name);
                 }
@@ -251,6 +260,7 @@ public final class Renamer extends Transformer {
             Dictionary dict = new Dictionary(config.seed, reserved);
             Set<String> done = new HashSet<>();
             for (JClass clazz : classes) {
+                context.checkCancelled();
                 for (MethodNode method : clazz.node().methods) {
                     String methodKey = key(method);
                     if (method.name.startsWith("<") || anchoredMethodKeys.contains(methodKey) || !done.add(methodKey)) {
@@ -264,6 +274,7 @@ public final class Renamer extends Transformer {
         if (config.transformers.renameFields) {
             Set<String> reserved = new HashSet<>();
             for (JClass clazz : classes) {
+                context.checkCancelled();
                 for (FieldNode field : clazz.node().fields) {
                     reserved.add(field.name);
                 }
@@ -272,6 +283,7 @@ public final class Renamer extends Transformer {
             Dictionary dict = new Dictionary(config.seed, reserved);
             Set<String> done = new HashSet<>();
             for (JClass clazz : classes) {
+                context.checkCancelled();
                 for (FieldNode field : clazz.node().fields) {
                     String fieldKey = key(field);
                     if (anchoredFieldKeys.contains(fieldKey) || !done.add(fieldKey)) {
@@ -285,6 +297,7 @@ public final class Renamer extends Transformer {
 
         // ---- export data for the mapping file (original names, before remap) ----
         for (JClass clazz : classes) {
+            context.checkCancelled();
             List<Mappings.MemberMapping> members = new ArrayList<>();
             for (FieldNode field : clazz.node().fields) {
                 members.add(new Mappings.MemberMapping(false, field.name, field.desc,
@@ -304,11 +317,13 @@ public final class Renamer extends Transformer {
         RemapperImpl remapper = new RemapperImpl(mappings);
         List<ClassNode> outputs = new ArrayList<>(classes.size());
         for (JClass clazz : classes) {
+            context.checkCancelled();
             ClassNode output = new ClassNode();
             clazz.node().accept(new VaporClassRemapper(output, remapper));
             outputs.add(output);
         }
         for (int i = 0; i < classes.size(); i++) {
+            context.checkCancelled();
             classes.get(i).setNode(outputs.get(i));
         }
         context.rekeyClasses();
@@ -319,12 +334,14 @@ public final class Renamer extends Transformer {
                                   Set<String> keptClasses, Mappings mappings) {
         Set<String> reserved = new HashSet<>();
         for (JClass clazz : classes) {
+            context.checkCancelled();
             reserved.add(clazz.name());
         }
         Dictionary dict = new Dictionary(config.seed, reserved);
         Map<JClass, String> newNames = new LinkedHashMap<>();
 
         for (JClass clazz : classes) {
+            context.checkCancelled();
             if (!keptClasses.contains(clazz.name()) && findOuter(context, clazz) == null) {
                 newNames.put(clazz, dict.next());
             }
@@ -334,14 +351,17 @@ public final class Renamer extends Transformer {
         // assigned later in jar order — resolve until a fixed point.
         List<JClass> pending = new ArrayList<>();
         for (JClass clazz : classes) {
+            context.checkCancelled();
             if (!keptClasses.contains(clazz.name()) && findOuter(context, clazz) != null) {
                 pending.add(clazz);
             }
         }
         boolean progress = true;
         while (progress && !pending.isEmpty()) {
+            context.checkCancelled();
             progress = false;
             for (Iterator<JClass> it = pending.iterator(); it.hasNext(); ) {
+                context.checkCancelled();
                 JClass clazz = it.next();
                 String outer = findOuter(context, clazz);
                 String outerNew = null;
@@ -365,10 +385,12 @@ public final class Renamer extends Transformer {
             }
         }
         for (JClass clazz : pending) {
+            context.checkCancelled();
             newNames.put(clazz, dict.next());   // broken metadata: fall back to a flat name
         }
 
         for (Map.Entry<JClass, String> entry : newNames.entrySet()) {
+            context.checkCancelled();
             mappings.mapClass(entry.getKey().name(), entry.getValue());
         }
     }
@@ -377,6 +399,7 @@ public final class Renamer extends Transformer {
     private static void addLibraryNames(Context context, List<JClass> classes,
                                         Set<String> reserved, boolean methods) {
         for (JClass clazz : classes) {
+            context.checkCancelled();
             for (String superName : transitiveSupers(context, clazz)) {
                 if (context.getClass(superName) != null) {
                     continue;
@@ -418,6 +441,7 @@ public final class Renamer extends Transformer {
                                              Set<String> anchoredMethods, Set<String> anchoredFields) {
         Map<String, Boolean> resolution = new HashMap<>();
         for (JClass clazz : classes) {
+            context.checkCancelled();
             for (MethodNode method : clazz.node().methods) {
                 for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                     if (insn instanceof MethodInsnNode call) {

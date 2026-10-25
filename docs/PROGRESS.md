@@ -22,6 +22,7 @@
 | v3.0–v3.4 | v3: coverage & control flow (0.3.0) | ✅ Done (2026-10-19) |
 | v3.5 | Post-release flattening fixes (0.3.1) | ✅ Done (2026-10-19) |
 | v3.6 | Spilled entry stacks + verifier-accurate `NEW` tracking (0.3.2) | ✅ Done (2026-10-25) |
+| v4.0 | Desktop GUI + shared CLI/GUI runner (0.4.0) | ✅ Done (2026-10-25) |
 
 **v1 is complete** — renaming + metadata hygiene + string encryption (+ watermark), rig-verified
 on Java 21 and Java 8 samples.
@@ -38,6 +39,12 @@ placement, exact-only frame merging). The 0.3.2 patch spills live entry-stack va
 locals, so ternaries and short-circuit expressions no longer disqualify a method, and models the
 verifier's `NEW`/`<init>` transition. Reference obfuscation, anti-tamper, salting and
 virtualization remain deferred (PLAN.md).
+
+**v4 (desktop) is complete (0.4.0)** — a Swing GUI on top of the same `Obfuscator` entry point as
+the CLI. It has jar/output/mapping pickers, library and keep-rule editing, every transform and
+hardening setting, config load/save, a live pipeline log, stage progress and cooperative cancel.
+The GUI writes to temporary files and only replaces the target after success, so failed/cancelled
+runs are safe. CLI behavior and bytes are unchanged for the same input and config.
 
 ## Phase 0 — Bootstrap ✅ (2026-10-17)
 
@@ -447,6 +454,21 @@ Artifacts for inspection: `%TEMP%\opencode\vapor-rig\hello-21\` and `...\legacy8
   **2399/8883** methods flattened (was 2094; 475 stack values spilled; no
   analyzer/unreachable/unsupported-stack skips), LoadCheck 1302/1302 clean, obfuscated CFR exit
   0, 733/733 self-decompile files byte-identical; determinism PASS (`F6ED…7D59F55`).
+- v4.0 (release `0.4.0`, desktop): extracted the CLI pipeline into `dev.vapor.Obfuscator` and
+  made both front-ends call it. Added `PipelineListener` stage events, `Context` cooperative
+  cancellation (`BooleanSupplier`, checked between stages and per class/entry), and a Swing UI
+  (`dev.vapor.gui.VaporGui`). The GUI materializes the current form into a `VaporConfig`, writes
+  the jar/mapping to sibling temp files, and moves them into place with `ATOMIC_MOVE` (fallback:
+  `REPLACE_EXISTING`). Cancelling deletes temp files and never touches an existing output.
+  Verification: 30/30 unit tests (new `ObfuscatorTest` cancellation/validation/config
+  round-trip and `PipelineTest` stage/cancel tests); all three rigs green; GUI smoke run on
+  demo-cli produced a loadable jar + mapping and a normal captured log; GUI cancellation smoke on
+  the CFR stress jar produced `=== cancelled ===`, no output and no leftover temp files; GUI
+  config load/read round-trip matched every field. CFR stress re-run on 0.4.0: 1302/1302
+  LoadCheck clean, obfuscated CFR exit 0, determinism hash unchanged
+  (`F6ED…7D59F55`). Fixed a log-capture bug found by the smoke test: `PrintStream` flushes
+  partial formatter chunks, so line capture now ignores `flush()` and splits only on newline
+  (with an explicit end-of-run `finish()`). Version/help/docs updated.
 
 ## Decisions log (short)
 
@@ -465,3 +487,7 @@ Artifacts for inspection: `%TEMP%\opencode\vapor-rig\hello-21\` and `...\legacy8
   registry.
 - **2026-10-18**: interfaces that get a decryptor and predate class-file v52 are promoted to v52
   (single per-class static method is the only construct that needs it; output targets Java 8+).
+- **2026-10-25**: desktop UI is Swing, in-process, and shares `Obfuscator` with the CLI. No new
+  dependency or separate packaging path; `java -jar vapor-0.4.0.jar` (no args) or `--gui` opens it.
+  GUI output goes through sibling temp files and only replaces the target on success; Cancel is
+  cooperative at stage/class granularity and deletes temp files.

@@ -48,6 +48,7 @@ public final class Watermark extends Transformer {
     public void run(Context context) {
         ClassNode target = null;
         for (var clazz : context.classes()) {
+            context.checkCancelled();
             ClassNode node = clazz.node();
             if ((node.access & (Opcodes.ACC_INTERFACE | Opcodes.ACC_ANNOTATION)) != 0) {
                 continue;

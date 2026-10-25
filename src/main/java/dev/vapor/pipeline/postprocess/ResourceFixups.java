@@ -37,6 +37,7 @@ public final class ResourceFixups implements IPass {
 
     @Override
     public void run(Context context) {
+        context.checkCancelled();
         fixManifest(context);
         fixServices(context);
     }
@@ -87,6 +88,7 @@ public final class ResourceFixups implements IPass {
 
     private static void fixServices(Context context) {
         for (JarEntry entry : List.copyOf(context.entries())) {
+            context.checkCancelled();
             if (!(entry instanceof JarEntry.Resource resource)
                     || resource.directory()
                     || !resource.name().startsWith(SERVICES_PREFIX)) {

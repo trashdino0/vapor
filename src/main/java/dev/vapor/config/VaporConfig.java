@@ -1,10 +1,12 @@
 package dev.vapor.config;
 
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonSyntaxException;
 
 import java.io.IOException;
 import java.io.Reader;
+import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -13,9 +15,9 @@ import java.util.List;
 
 /**
  * User-facing configuration (JSON, Gson-bound). Every field has a working
- * default, so an empty file (or no {@code -config} at all) means "full v1
+ * default, so an empty file (or no {@code -config} at all) means "full default
  * pipeline": rename everything that can be renamed, clean metadata, encrypt
- * strings.
+ * strings, and apply the v2/v3 hardening transforms.
  */
 public final class VaporConfig {
 
@@ -101,5 +103,16 @@ public final class VaporConfig {
             config.hardening = new Hardening();
         }
         return config;
+    }
+
+    /** Write this config as pretty-printed JSON (the inverse of {@link #load(Path)}). */
+    public void save(Path path) throws IOException {
+        Path parent = path.toAbsolutePath().getParent();
+        if (parent != null) {
+            Files.createDirectories(parent);
+        }
+        try (Writer writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
+            new GsonBuilder().setPrettyPrinting().create().toJson(this, writer);
+        }
     }
 }

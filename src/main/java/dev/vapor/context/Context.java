@@ -15,6 +15,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
+import java.util.function.BooleanSupplier;
 
 /**
  * The world model shared by all pipeline passes: jar classes, non-class
@@ -26,6 +28,7 @@ public final class Context implements Closeable {
     private final Path input;
     private final Path output;
     private final LibraryLoader libraries;
+    private final BooleanSupplier cancelled;
 
     private final Map<String, JClass> classes = new LinkedHashMap<>();
     private final List<JarEntry> entries = new ArrayList<>();
@@ -36,9 +39,28 @@ public final class Context implements Closeable {
     private SimpleHierarchy hierarchy;
 
     public Context(Path input, Path output, List<Path> libraryPaths) throws IOException {
+        this(input, output, libraryPaths, () -> false);
+    }
+
+    /**
+     * @param cancelled polled by passes at safe points; the desktop UI flips it
+     *                  when the user presses Cancel. A cancelled run throws
+     *                  {@link CancellationException}, which must not be treated
+     *                  as a transform failure.
+     */
+    public Context(Path input, Path output, List<Path> libraryPaths, BooleanSupplier cancelled)
+            throws IOException {
         this.input = input;
         this.output = output;
         this.libraries = new LibraryLoader(libraryPaths);
+        this.cancelled = cancelled == null ? () -> false : cancelled;
+    }
+
+    /** Abort the current run at the next safe point. */
+    public void checkCancelled() {
+        if (cancelled.getAsBoolean()) {
+            throw new CancellationException("vapor: obfuscation cancelled");
+        }
     }
 
     /**

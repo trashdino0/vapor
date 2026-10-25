@@ -33,6 +33,7 @@ public final class JarLoad implements IPass {
         JarIO.JarContents contents = JarIO.read(input);
         int classes = 0;
         for (JarIO.Entry entry : contents.entries()) {
+            context.checkCancelled();
             String name = entry.name();
             if (!entry.directory() && name.equals("module-info.class")) {
                 System.err.println("  warn: module-info.class left untouched (modules are phase-5 work)");

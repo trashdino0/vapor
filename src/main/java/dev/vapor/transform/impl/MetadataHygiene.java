@@ -47,6 +47,7 @@ public final class MetadataHygiene extends Transformer {
     @Override
     public void run(Context context) {
         for (var clazz : context.classes()) {
+            context.checkCancelled();
             strip(clazz.node());
         }
     }

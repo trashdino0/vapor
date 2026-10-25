@@ -139,7 +139,7 @@ public final class Main {
                   -i, --input <jar>       input jar
                   -o, --output <jar>      output jar
                   -lib, --library <path>  library jar or class directory (repeatable)
-                  -config <file>          JSON config (defaults: full v1 pipeline)
+                  -config <file>          JSON config (defaults: full v3 pipeline, hardening on)
                   -mapping <file>         write a ProGuard-style mapping file
                   -keep <glob>            keep class names matching the dotted glob (repeatable)
                   -v, --version           print version

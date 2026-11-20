@@ -16,5 +16,9 @@ obfuscators/**/*.jar
 
 # Logs and OS cruft
 *.log
+hs_err_pid*.log
+replay_pid*.log
 Thumbs.db
 desktop.ini
+.vs/
+*.class
